@@ -43,6 +43,7 @@ st.markdown(
 # 3) Autentifikacija per st.secrets
 # ------------------------------------------------------------
 def _read_users_from_secrets():
+    """Grąžina vartotojų sąrašą iš st.secrets. Jei neranda, grąžina []."""
     try:
         users = st.secrets["auth"]["users"]
         if not isinstance(users, (list, tuple)):
@@ -60,6 +61,7 @@ def _read_users_from_secrets():
         return []
 
 def _bcrypt_check(password, password_hash):
+    """Tikrina bcrypt hash; jei bcrypt neįdiegtas, grąžina False."""
     try:
         import bcrypt
     except Exception:
@@ -74,6 +76,7 @@ def _bcrypt_check(password, password_hash):
         return False
 
 def _is_valid_credentials(email: str, password: str) -> bool:
+    """Leidžia prisijungti, jei el. paštas + slaptažodis atitinka secrets (case-insensitive email)."""
     email = (email or "").strip().lower()
     password = (password or "")
     if not email or not password:
@@ -216,13 +219,7 @@ def compute_summary(df: pd.DataFrame):
 def compute_monthly_balances(df: pd.DataFrame, initial_balance: float, overrides: dict):
     """
     Grąžina:
-      months -> dict su:
-        {
-          'pajamos': float,
-          'islaidos': float,
-          'opening': float,
-          'closing': float
-        }
+      { 'YYYY-MM': {'pajamos': float, 'islaidos': float, 'opening': float, 'closing': float}, ... }
     opening: overrides.get(m, prev_closing) arba initial_balance pirmajam.
     """
     if df.empty:
@@ -235,9 +232,7 @@ def compute_monthly_balances(df: pd.DataFrame, initial_balance: float, overrides
         return {}
 
     tmp["Mėnuo"] = tmp["Data_dt"].dt.to_period("M").astype(str)
-    # sumos per mėnesį ir tipą
     piv = tmp.pivot_table(index="Mėnuo", columns="Tipas", values="Suma (€)", aggfunc="sum", fill_value=0.0)
-    # užtikrinam stulpelius
     for col in ["Pajamos", "Išlaidos"]:
         if col not in piv.columns:
             piv[col] = 0.0
@@ -248,7 +243,6 @@ def compute_monthly_balances(df: pd.DataFrame, initial_balance: float, overrides
     for m in piv.index.tolist():
         paj = float(piv.loc[m, "Pajamos"])
         isl = float(piv.loc[m, "Išlaidos"])
-        opening = None
 
         if isinstance(overrides, dict) and m in overrides:
             opening = float(overrides[m])
@@ -269,6 +263,7 @@ def compute_monthly_balances(df: pd.DataFrame, initial_balance: float, overrides
     return result
 
 def available_months(df: pd.DataFrame):
+    df = _ensure_columns(df)
     if df.empty:
         today_m = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
         return [today_m]
@@ -279,15 +274,20 @@ def available_months(df: pd.DataFrame):
 # ------------------------------------------------------------
 # 5) UI komponentai
 # ------------------------------------------------------------
-def render_topbar(month_selected: str):
+def render_topbar(months):
     left, mid, right = st.columns([1.4, 2, 1.2])
     with left:
         st.markdown("## 💶 Asmeninis biudžetas")
     with mid:
-        st.selectbox("Mėnuo", options=available_months(_ensure_columns(st.session_state.budget_df)),
-                     index=max(available_months(_ensure_columns(st.session_state.budget_df)).index(month_selected)
-                               if month_selected in available_months(_ensure_columns(st.session_state.budget_df)) else 0, 0),
-                     key="selected_month")
+        # Default – paskutinis žinomas mėnuo
+        default_month = st.session_state.get("selected_month", months[-1])
+        idx = months.index(default_month) if default_month in months else len(months) - 1
+        st.selectbox(
+            "Mėnuo",
+            options=months,
+            index=idx,
+            key="selected_month",   # selectbox pats tvarko session_state
+        )
     with right:
         user = st.session_state.auth.get("user_email")
         st.caption(f"Prisijungta: **{user}**" if user else "")
@@ -296,45 +296,49 @@ def render_topbar(month_selected: str):
 
 def render_balance_settings():
     st.markdown("### Likučio nustatymai")
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
+
+    # Row 1: du įvedimai tame pačiame lygyje (vienas lizdinimo lygis)
+    r1c1, r1c2 = st.columns([1, 1])
+
+    with r1c1:
+        if "initial_balance" not in st.session_state:
+            st.session_state.initial_balance = 0.0
+
         st.number_input(
             "Pradinis likutis (pirmajam mėnesiui)",
             min_value=-1_000_000.0,
             max_value=1_000_000.0,
             step=10.0,
-            value=float(st.session_state.initial_balance),
-            key="initial_balance",
+            key="initial_balance",  # be value=, nes key jau riša su session_state
             help="Naudojamas tik pirmam mėnesiui, jei nenurodytas perrašymas.",
         )
-    with c2:
-        # perrašymas tik dabartiniam pasirinktam mėnesiui
+
+    with r1c2:
         cur_m = st.session_state.get("selected_month") or available_months(st.session_state.budget_df)[0]
         cur_val = float(st.session_state.opening_overrides.get(cur_m, 0.0))
-        new_val = st.number_input(
+        # Vietinis įvedimas (be key)
+        override_val = st.number_input(
             f"Šio mėnesio pradžios likutis ({cur_m})",
             min_value=-1_000_000.0,
             max_value=1_000_000.0,
             step=10.0,
             value=cur_val,
-            key="override_input",
             help="Jei nori priverstinai nurodyti šio mėnesio pradžią.",
         )
-    with c3:
-        colA, colB = st.columns([1, 1])
-        with colA:
-            if st.button("💾 Išsaugoti šio mėn. pradžią", use_container_width=True):
-                cur_m = st.session_state.get("selected_month")
-                st.session_state.opening_overrides[cur_m] = float(st.session_state.override_input)
-                st.success(f"Išsaugota {cur_m} pradžia: {st.session_state.override_input:.2f} €")
+
+    # Row 2: mygtukai (kitas columns rinkinys tame pačiame lygyje)
+    r2c1, r2c2 = st.columns([1, 1])
+    with r2c1:
+        if st.button("💾 Išsaugoti šio mėn. pradžią", use_container_width=True, key="btn_save_opening"):
+            st.session_state.opening_overrides[cur_m] = float(override_val)
+            st.success(f"Išsaugota {cur_m} pradžia: {override_val:.2f} €")
+            st.rerun()
+    with r2c2:
+        if st.button("♻️ Pašalinti šio mėn. perrašymą", use_container_width=True, key="btn_clear_opening"):
+            if cur_m in st.session_state.opening_overrides:
+                st.session_state.opening_overrides.pop(cur_m, None)
+                st.success(f"Pašalintas {cur_m} pradžios perrašymas")
                 st.rerun()
-        with colB:
-            if st.button("♻️ Pašalinti šio mėn. perrašymą", use_container_width=True):
-                cur_m = st.session_state.get("selected_month")
-                if cur_m in st.session_state.opening_overrides:
-                    st.session_state.opening_overrides.pop(cur_m, None)
-                    st.success(f"Pašalintas {cur_m} pradžios perrašymas")
-                    st.rerun()
 
 def render_budget_form():
     st.markdown("### Naujas įrašas")
@@ -374,7 +378,6 @@ def _filters_ui(df: pd.DataFrame):
         st.caption("Filtrai bus aktyvūs, kai atsiras įrašų.")
         return df
 
-    # Datos intervalas
     df_dates = pd.to_datetime(df["Data"], errors="coerce")
     min_d, max_d = df_dates.min().date(), df_dates.max().date()
     col1, col2, col3 = st.columns([1.1, 1, 2])
@@ -390,7 +393,6 @@ def _filters_ui(df: pd.DataFrame):
         cats = sorted([c for c in df["Kategorija"].dropna().unique() if str(c).strip() != ""])
         choose_cats = st.multiselect("Kategorijos (nebūtina)", cats, default=cats)
 
-    # Taikome filtrus
     f = df.copy()
     f["Data_dt"] = pd.to_datetime(f["Data"], errors="coerce").dt.date
     f = f[(f["Data_dt"] >= start_d) & (f["Data_dt"] <= end_d)]
@@ -405,21 +407,19 @@ def render_month_header_and_metrics():
     df = _ensure_columns(st.session_state.budget_df)
     months = available_months(df)
     sel = st.session_state.get("selected_month") or months[-1]
-    st.session_state.selected_month = sel
+    st.session_state.selected_month = sel  # tik atnaujinam vidinę būseną pagal selectbox
 
-    # mėnesio balanso skaičiavimai
     monthly = compute_monthly_balances(df, st.session_state.initial_balance, st.session_state.opening_overrides)
-    # jei dar nėra duomenų – suformuojam "tuščią" įrašą pasirinktam mėnesiui
+
+    # Jei pasirinktam mėnesiui nėra įrašų — suformuojam tuščią su atitinkamu opening
     if sel not in monthly:
-        monthly[sel] = {
-            "pajamos": 0.0,
-            "islaidos": 0.0,
-            "opening": float(st.session_state.opening_overrides.get(sel,
-                      st.session_state.initial_balance if len(monthly) == 0
-                      else list(monthly.values())[-1]["closing"])),
-            "closing": 0.0,
-        }
-        monthly[sel]["closing"] = round(monthly[sel]["opening"] + 0.0 - 0.0, 2)
+        prev_months = sorted(monthly.keys())
+        if prev_months:
+            prev_closing = monthly[prev_months[-1]]["closing"]
+        else:
+            prev_closing = st.session_state.initial_balance
+        opening = float(st.session_state.opening_overrides.get(sel, prev_closing))
+        monthly[sel] = {"pajamos": 0.0, "islaidos": 0.0, "opening": round(opening, 2), "closing": round(opening, 2)}
 
     cur = monthly[sel]
 
@@ -468,7 +468,7 @@ def render_charts():
     f = _filters_ui(df)
     st.markdown("---")
 
-    # 1) Išlaidos pagal kategoriją (filtruotas laikotarpis)
+    # 1) Išlaidos pagal kategoriją
     col1, col2 = st.columns(2)
     with col1:
         out_df = f[f["Tipas"] == "Išlaidos"].copy()
@@ -565,25 +565,24 @@ def main():
 
     _init_budget_state()
 
-    # Mėnesio pasirinkimas + top juosta
+    # Mėnesių sąrašas ir viršutinė juosta
     months = available_months(st.session_state.budget_df)
-    # pasiūlysim naujausią mėnesį kaip default
-    default_month = months[-1] if months else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
     if "selected_month" not in st.session_state:
-        st.session_state.selected_month = default_month
+        st.session_state.selected_month = months[-1]
+    render_topbar(months)
 
-    render_topbar(month_selected=st.session_state.selected_month)
-
-    # Likučio nustatymai ir mėnesio suvestinė
+    # Pagrindinis išdėstymas: kairė (nustatymai, forma, eksportas), dešinė (suvestinė, lentelė, diagramos)
     with st.container():
-        cA, cB = st.columns([1.05, 1.95])
-        with cA:
+        left, right = st.columns([1.05, 1.95])
+
+        with left:
             render_balance_settings()
             st.markdown("---")
             render_budget_form()
             st.markdown("---")
             render_export()
-        with cB:
+
+        with right:
             render_month_header_and_metrics()
             st.markdown("---")
             render_budget_table_and_summary()
