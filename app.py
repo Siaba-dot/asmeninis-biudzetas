@@ -1,4 +1,4 @@
-
+import os
 import io
 import streamlit as st
 import pandas as pd
@@ -79,7 +79,7 @@ def get_supabase() -> Client:
             "❌ Secrets nerasta sekcija [supabase].\n\n"
             "Pridėkite į Secrets (TOML):\n"
             "[supabase]\n"
-            'url = "https://tavopavadinimas.supabase.co"\n'
+            'url = "https://<tavo>.supabase.co"\n'
             'anon_key = "ey..."\n'
         )
         st.stop()
@@ -90,9 +90,7 @@ def get_supabase() -> Client:
     if not url or not key:
         st.error(
             "❌ Trūksta [supabase] reikšmių.\n"
-            "Reikalinga:\n"
-            '  url = "https://...supabase.co"\n'
-            '  anon_key = "ey..."\n'
+            'Reikalinga: url = "https://...supabase.co", anon_key = "ey..."\n'
         )
         st.stop()
 
@@ -121,7 +119,7 @@ def ensure_session_value_in_options(session_key: str, options: List[str], defaul
     if not options:
         return
     if default_value is None:
-        default_value = options[-1]  # naujausias
+        default_value = options[-1]
     if session_key not in st.session_state:
         st.session_state[session_key] = default_value
     if st.session_state[session_key] not in options:
@@ -141,52 +139,83 @@ def render_month_select(months: List[str], title="Mėnuo", state_key="selected_m
     return selected
 
 # =========================
-# Auth (email + password) su sesijos išlaikymu
+# AUTH: 1) Secrets [auth].users (jei yra) ELSE 2) Supabase Auth
 # =========================
-def hydrate_session_from_state():
-    access = st.session_state.get("sb_access_token")
-    refresh = st.session_state.get("sb_refresh_token")
-    if access and refresh:
-        try:
-            supabase.auth.set_session(access_token=access, refresh_token=refresh)
-        except Exception:
-            pass
+def _has_local_auth() -> bool:
+    return "auth" in st.secrets and isinstance(st.secrets["auth"], dict) and isinstance(st.secrets["auth"].get("users"), list)
 
-def current_session():
-    return supabase.auth.get_session().session
+def _check_local_credentials(email: str, password: str) -> bool:
+    try:
+        for u in st.secrets["auth"]["users"]:
+            if (u.get("email") == email) and (u.get("password") == password):
+                return True
+    except Exception:
+        pass
+    return False
 
 def login_ui() -> bool:
-    hydrate_session_from_state()
-    if current_session():
-        return True
-    st.subheader("🔐 Prisijungimas")
-    with st.form("login_form", border=False):
-        email = st.text_input("El. paštas")
-        pwd = st.text_input("Slaptažodis", type="password")
-        submitted = st.form_submit_button("Prisijungti", use_container_width=True)
-    if submitted:
-        try:
-            res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
-            if res and res.session:
-                st.session_state["sb_access_token"]  = res.session.access_token
-                st.session_state["sb_refresh_token"] = res.session.refresh_token
+    if _has_local_auth():
+        # Vietinis prisijungimas iš Secrets [auth].users
+        if st.session_state.get("auth_ok"):
+            return True
+        st.subheader("🔐 Prisijungimas")
+        with st.form("login_form_local", border=False):
+            email = st.text_input("El. paštas")
+            pwd = st.text_input("Slaptažodis", type="password")
+            submitted = st.form_submit_button("Prisijungti", use_container_width=True)
+        if submitted:
+            if _check_local_credentials(email, pwd):
+                st.session_state["auth_ok"] = True
+                st.session_state["auth_user_email"] = email
                 st.experimental_rerun()
             else:
                 st.error("Neteisingi duomenys.")
-        except Exception as e:
-            st.error(f"Prisijungti nepavyko: {e}")
-    return False
+        return False
+    else:
+        # Supabase Auth
+        access = st.session_state.get("sb_access_token")
+        refresh = st.session_state.get("sb_refresh_token")
+        if access and refresh:
+            try:
+                supabase.auth.set_session(access_token=access, refresh_token=refresh)
+            except Exception:
+                pass
+        if supabase.auth.get_session().session:
+            return True
+        st.subheader("🔐 Prisijungimas")
+        with st.form("login_form_sb", border=False):
+            email = st.text_input("El. paštas")
+            pwd = st.text_input("Slaptažodis", type="password")
+            submitted = st.form_submit_button("Prisijungti", use_container_width=True)
+        if submitted:
+            try:
+                res = supabase.auth.sign_in_with_password({"email": email, "password": pwd})
+                if res and res.session:
+                    st.session_state["sb_access_token"]  = res.session.access_token
+                    st.session_state["sb_refresh_token"] = res.session.refresh_token
+                    st.experimental_rerun()
+                else:
+                    st.error("Neteisingi duomenys.")
+            except Exception as e:
+                st.error(f"Prisijungti nepavyko: {e}")
+        return False
 
 def logout_ui():
-    if st.sidebar.button("Atsijungti", use_container_width=True):
-        try:
-            supabase.auth.sign_out()
-        except Exception:
-            pass
-        for k in ("sb_access_token","sb_refresh_token"):
-            if k in st.session_state:
-                del st.session_state[k]
-        st.experimental_rerun()
+    if _has_local_auth():
+        if st.sidebar.button("Atsijungti", use_container_width=True):
+            st.session_state.pop("auth_ok", None)
+            st.session_state.pop("auth_user_email", None)
+            st.experimental_rerun()
+    else:
+        if st.sidebar.button("Atsijungti", use_container_width=True):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+            for k in ("sb_access_token","sb_refresh_token"):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.experimental_rerun()
 
 # =========================
 # DB užklausos
@@ -268,11 +297,10 @@ def fetch_trend_df(last_n_months: int = DEFAULT_MONTHS_TREND) -> pd.DataFrame:
 # =========================
 # Diagramos
 # =========================
-def plot_monthly_trend(df: pd.DataFrame) -> Optional[go.Figure]:
+def plot_monthly_trend(df: pd.DataFrame):
     if df.empty:
         return None
     agg = df.groupby(["ym", COL_TYPE], as_index=False)[COL_AMOUNT].sum()
-    # užpildom trūkstamas kombinacijas
     all_ym = sorted(agg["ym"].unique().tolist())
     for t in ["Pajamos","Išlaidos"]:
         if not ((agg[COL_TYPE] == t).any()):
@@ -298,7 +326,7 @@ def plot_monthly_trend(df: pd.DataFrame) -> Optional[go.Figure]:
     )
     return fig
 
-def plot_expense_pie(df_month: pd.DataFrame) -> Optional[go.Figure]:
+def plot_expense_pie(df_month: pd.DataFrame):
     if df_month.empty:
         return None
     exp = df_month[df_month[COL_TYPE] == "Išlaidos"]
@@ -310,7 +338,7 @@ def plot_expense_pie(df_month: pd.DataFrame) -> Optional[go.Figure]:
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10))
     return fig
 
-def plot_category_bars(df_month: pd.DataFrame, tlabel: str) -> Optional[go.Figure]:
+def plot_category_bars(df_month: pd.DataFrame, tlabel: str):
     if df_month.empty:
         return None
     sub = df_month[df_month[COL_TYPE] == tlabel]
@@ -325,7 +353,7 @@ def plot_category_bars(df_month: pd.DataFrame, tlabel: str) -> Optional[go.Figur
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10), yaxis=dict(autorange="reversed"))
     return fig
 
-def plot_merchant_bar(df_month: pd.DataFrame) -> Optional[go.Figure]:
+def plot_merchant_bar(df_month: pd.DataFrame):
     if df_month.empty:
         return None
     exp = df_month[df_month[COL_TYPE] == "Išlaidos"].copy()
@@ -355,7 +383,6 @@ def insert_row(when: date, typ: str, category: str, merchant: str, desc: str, am
     }
     try:
         res = supabase.table(TABLE).insert(payload).execute()
-        # Unikalumo raktas biudzetas_natural_key_uk
         if getattr(res, "error", None):
             msg = str(res.error)
             if "biudzetas_natural_key_uk" in msg or "duplicate key value" in msg.lower():
@@ -410,17 +437,14 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Duomenys") -> bytes:
 # Pagrindinis
 # =========================
 def main():
-    # Auth
     if not login_ui():
         st.stop()
     logout_ui()
 
     st.title("💶 Asmeninis biudžetas")
 
-    # Mėnesiai
     months = fetch_months()
 
-    # Topbar
     with st.container():
         st.markdown('<div class="topbar">', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns([1.4, 0.9, 1, 1], gap="small")
@@ -436,7 +460,6 @@ def main():
 
     st.markdown("<hr/>", unsafe_allow_html=True)
 
-    # Įvedimas
     entry_form()
 
     st.markdown("<hr/>", unsafe_allow_html=True)
@@ -445,7 +468,6 @@ def main():
         st.info("Pasirinkite mėnesį.")
         st.stop()
 
-    # Suvestinė
     df_month = fetch_month_df(selected_month)
     s_inc = float(df_month.loc[df_month[COL_TYPE] == "Pajamos", COL_AMOUNT].sum()) if not df_month.empty else 0.0
     s_exp = float(df_month.loc[df_month[COL_TYPE] == "Išlaidos", COL_AMOUNT].sum()) if not df_month.empty else 0.0
@@ -457,7 +479,6 @@ def main():
     k2.metric("Išlaidos", money(s_exp))
     k3.metric("Balansas", money(s_bal))
 
-    # Diagramos
     st.markdown("## 📈 Diagramos")
 
     df_trend = fetch_trend_df(trend_window)
@@ -496,7 +517,6 @@ def main():
     else:
         st.plotly_chart(fig_merch, use_container_width=True, theme=None)
 
-    # Lentelė + Excel
     st.markdown("## 🧾 Operacijų sąrašas")
     if df_month.empty:
         st.info("Šiam mėnesiui operacijų nėra.")
@@ -525,3 +545,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+     
