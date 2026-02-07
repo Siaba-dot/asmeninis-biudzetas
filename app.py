@@ -3,7 +3,7 @@ import streamlit as st
 from datetime import date, timedelta
 from supabase import Client
 from supabase_client import get_supabase, current_user
-from auth import render_auth_ui, sign_out
+import auth  # vietinis modulis
 import pandas as pd
 
 # -------------------------
