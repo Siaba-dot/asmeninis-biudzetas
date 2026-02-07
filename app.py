@@ -1,31 +1,17 @@
 # -*- coding: utf-8 -*-
-# Asmeninis biudžetas — vieno failo Streamlit aplikacija be išorinių importų (auth integruotas)
-# Skirta veikti be jokių papildomų modulių/importų iš kitų failų.
-# Pastaba: jei nori debug prieš UI, naudok print(), o ne st.write(), nes
-# st.set_page_config PRIVALO būti pirmoji Streamlit komanda.
+# Asmeninis biudžetas — vieno failo Streamlit aplikacija
+# Autentifikacija tik per st.secrets (Secrets manager), be jokio jautraus kodo repo.
 
 import os
 import sys
 from datetime import datetime, date
 from io import BytesIO
 
-import pandas as pd
 import streamlit as st
+import pandas as pd
 
 # ------------------------------------------------------------
-# (Ne Streamlit) diagnostika į LOGUS (saugiai prieš UI)
-# ------------------------------------------------------------
-print("DEBUG VERSION MARKER:", "v2026-02-07-3")
-print("DEBUG __file__:", __file__)
-print("DEBUG CWD:", os.getcwd())
-try:
-    print("DEBUG listdir(__dir__):", os.listdir(os.path.dirname(os.path.abspath(__file__)))[:50])
-except Exception as _e:
-    print("DEBUG listdir exception:", repr(_e))
-print("DEBUG sys.path head:", sys.path[:3])
-
-# ------------------------------------------------------------
-# PIRMA Streamlit komanda: puslapio konfigūracija
+# PIRMA Streamlit komanda — puslapio konfigūracija
 # ------------------------------------------------------------
 st.set_page_config(
     page_title="Asmeninis biudžetas",
@@ -35,53 +21,125 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------
-# Minimalus CSS – kompaktiškas išdėstymas, mažesni viršutiniai tarpai
+# Minimalus CSS — kompaktiškas išdėstymas
 # ------------------------------------------------------------
 st.markdown(
     """
     <style>
-      header {visibility: hidden;} /* paslepia viršutinę juostą */
+      header {visibility: hidden;}
       .block-container {padding-top: 1rem; padding-bottom: 1rem; max-width: 1400px;}
-      /* tamsesnė/„neon“ nuotaika be perdėto ryškumo */
       .stMetric {background: #111; border-radius: 8px; padding: 0.75rem; border: 1px solid #222;}
-      .stButton>button {background:#1f2937; color:#e5e7eb; border:1px solid #374151;}
-      .stButton>button:hover {background:#111827; border-color:#4b5563;}
-      .stDownloadButton>button {background:#1f2937; color:#e5e7eb; border:1px solid #374151;}
-      .stDownloadButton>button:hover {background:#111827; border-color:#4b5563;}
-      .css-1dp5vir edgvbvh3, .st-emotion-cache-16txtl3 {padding-top:0rem !important;}
+      .stButton>button, .stDownloadButton>button {
+        background:#1f2937; color:#e5e7eb; border:1px solid #374151;
+      }
+      .stButton>button:hover, .stDownloadButton>button:hover {
+        background:#111827; border-color:#4b5563;
+      }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ------------------------------------------------------------
-# Autentifikacija (integruota čia, be jokių kitų failų)
+# Autentifikacija iš st.secrets
+# Palaiko: plaintext password ARBA bcrypt password_hash (st.secrets)
 # ------------------------------------------------------------
+def _read_users_from_secrets():
+    """Grąžina vartotojų sąrašą iš st.secrets. Jei nieko nėra, grąžina []."""
+    try:
+        users = st.secrets["auth"]["users"]
+        if not isinstance(users, (list, tuple)):
+            return []
+        # normalizuojam raktus
+        norm = []
+        for u in users:
+            if not isinstance(u, dict):
+                continue
+            norm.append({
+                "email": str(u.get("email", "")).strip(),
+                "password": u.get("password"),           # plaintext pasirinktinai
+                "password_hash": u.get("password_hash"), # bcrypt hash pasirinktinai
+            })
+        return norm
+    except Exception:
+        return []
+
+def _bcrypt_check(password, password_hash):
+    """Patikrina bcrypt hash. Jei bcrypt nėra instaliuotas – grąžina False."""
+    try:
+        import bcrypt
+    except Exception:
+        return False
+    try:
+        if isinstance(password, str):
+            password = password.encode("utf-8")
+        if isinstance(password_hash, str):
+            password_hash = password_hash.encode("utf-8")
+        return bcrypt.checkpw(password, password_hash)
+    except Exception:
+        return False
+
+def _is_valid_credentials(email: str, password: str) -> bool:
+    """Leidžia prisijungti, jei atitinka plaintext arba bcrypt hash iš secrets."""
+    email = (email or "").strip()
+    password = (password or "")
+    if not email or not password:
+        return False
+
+    users = _read_users_from_secrets()
+    for u in users:
+        if u.get("email") == email:
+            # 1) bcrypt
+            ph = u.get("password_hash")
+            if ph and _bcrypt_check(password, ph):
+                return True
+            # 2) plaintext (jei pasirinkta)
+            pw = u.get("password")
+            if isinstance(pw, str) and pw == password:
+                return True
+    return False
+
 def _init_auth_state():
     if "auth" not in st.session_state:
         st.session_state.auth = {"is_authenticated": False, "user_email": None, "ts": None}
 
 def render_auth_ui():
+    users = _read_users_from_secrets()
+    if not users:
+        st.error(
+            "Nerasti prisijungimo duomenys `st.secrets`. "
+            "Eik į *Manage app → Settings → Secrets* ir pridėk [auth].users sąrašą. "
+            "Žr. README instrukciją arba kreipkis dėl pavyzdžio."
+        )
+        with st.expander("Greitas pavyzdys (plaintext)", expanded=False):
+            st.code(
+                '''[auth]
+users = [
+  { email = "vardas@pastas.lt", password = "slaptazodis" }
+]''',
+                language="toml",
+            )
+        with st.expander("Greitas pavyzdys (bcrypt)", expanded=False):
+            st.code(
+                '''[auth]
+users = [
+  { email = "vardas@pastas.lt", password_hash = "$2b$12$...." }
+]''',
+                language="toml",
+            )
+        return
+
     st.markdown("### Prisijungimas")
     with st.form("login_form", clear_on_submit=False):
         email = st.text_input("El. paštas", placeholder="pvz., vardas@pastas.lt")
         password = st.text_input("Slaptažodis", type="password", placeholder="••••••••")
         submitted = st.form_submit_button("Prisijungti", use_container_width=True)
 
-    # DEMO logika (pakeisk į tikrą – pvz., prieš DB ar supabase)
-    VALID = {
-        "sigita@example.com": "123456",
-        "demo@demo.lt": "demo",
-    }
-
     if submitted:
-        if not email or not password:
-            st.error("Įvesk el. paštą ir slaptažodį.")
-            return
-        if email in VALID and password == VALID[email]:
+        if _is_valid_credentials(email, password):
             st.session_state.auth = {
                 "is_authenticated": True,
-                "user_email": email,
+                "user_email": email.strip(),
                 "ts": datetime.utcnow().isoformat(),
             }
             st.success("Sėkmingai prisijungta ✅")
@@ -94,7 +152,7 @@ def sign_out():
     st.experimental_rerun()
 
 # ------------------------------------------------------------
-# Biudžeto duomenų valdymas
+# Biudžeto logika
 # ------------------------------------------------------------
 def _init_budget_state():
     if "budget_df" not in st.session_state:
@@ -105,10 +163,10 @@ def _init_budget_state():
 def add_transaction_row(dt: date, ttype: str, category: str, note: str, amount: float):
     row = {
         "Data": dt.strftime("%Y-%m-%d"),
-        "Tipas": ttype,  # "Pajamos" arba "Išlaidos"
-        "Kategorija": category.strip(),
-        "Aprašymas": note.strip(),
-        "Suma (€)": float(f"{float(amount):.2f}"),  # 2 skaitmenys po kablelio
+        "Tipas": ttype,
+        "Kategorija": (category or "").strip(),
+        "Aprašymas": (note or "").strip(),
+        "Suma (€)": round(float(amount), 2),
     }
     st.session_state.budget_df = pd.concat(
         [st.session_state.budget_df, pd.DataFrame([row])],
@@ -124,7 +182,7 @@ def compute_summary(df: pd.DataFrame):
     return round(pajamos, 2), round(islaidos, 2), balansas
 
 # ------------------------------------------------------------
-# UI komponentai
+# UI
 # ------------------------------------------------------------
 def render_topbar():
     left, mid, right = st.columns([1.2, 2, 1])
@@ -156,7 +214,7 @@ def render_budget_form():
         if st.button("➕ Pridėti", use_container_width=True):
             if amount <= 0:
                 st.warning("Suma turi būti didesnė už 0.")
-            elif not category.strip():
+            elif not (category or "").strip():
                 st.warning("Įvesk kategoriją.")
             else:
                 add_transaction_row(dt, ttype, category, note, amount)
@@ -206,7 +264,7 @@ def render_export():
         use_container_width=True,
     )
 
-    # Excel (bandome su openpyxl; jei nėra – rodom žinutę)
+    # Excel
     try:
         with BytesIO() as output:
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -218,11 +276,11 @@ def render_export():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
-    except Exception as e:
-        st.caption("Excel eksportui reikia `openpyxl`. Jei nematai mygtuko – pridėk `openpyxl` į requirements.txt.")
+    except Exception:
+        st.caption("Excel eksportui reikia `openpyxl`. Įtrauk į requirements.txt, jei mygtukas neveikia.")
 
 # ------------------------------------------------------------
-# Pagrindinė funkcija
+# App
 # ------------------------------------------------------------
 def main():
     _init_auth_state()
@@ -243,11 +301,5 @@ def main():
         with table_col:
             render_budget_table_and_summary()
 
-# ------------------------------------------------------------
-# Įėjimo taškas
-# ------------------------------------------------------------
 if __name__ == "__main__":
     main()
-
-  
-  
