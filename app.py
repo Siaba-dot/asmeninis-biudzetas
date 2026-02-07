@@ -1,10 +1,11 @@
+import os
 import io
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
-from datetime import date, datetime
+from datetime import date
 from typing import List, Optional, Dict
 from supabase import create_client, Client
 
@@ -20,10 +21,9 @@ COL_DESC         = "aprasymas"          # TEXT (NOT NULL DEFAULT '')
 COL_AMOUNT       = "suma_eur"           # NUMERIC(12,2)
 
 CURRENCY         = "€"
-DEFAULT_MONTHS_TREND = 12               # kiek mėn. rodyti trendo grafike
-
-SHOW_ENTRY_FORM  = True                 # įvedimo forma (jei nereikia – False)
-SHOW_EXPORT_XLSX = True                 # mėnesio lentelės eksportas į Excel
+DEFAULT_MONTHS_TREND = 12               # trendo langas (mėn.)
+SHOW_ENTRY_FORM  = True                 # rodyti įvedimo formą
+SHOW_EXPORT_XLSX = True                 # leisti mėnesio lentelės eksportą į Excel
 
 # =========================
 # PUSLAPIO NUSTATYMAI + STILIUS
@@ -56,7 +56,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Plotly „neon dark“ tema
+# Plotly tema
 pio.templates["neon_dark"] = go.layout.Template(
     layout=dict(
         paper_bgcolor="#0f1226",
@@ -71,18 +71,44 @@ pio.templates["neon_dark"] = go.layout.Template(
 pio.templates.default = "neon_dark"
 
 # =========================
-# SUPABASE klientas
+# Supabase inicializacija: palaiko flat ir [supabase] sekciją
 # =========================
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def get_supabase() -> Client:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_ANON_KEY"]
-    return create_client(url, key)
+    # 1) Plokšti raktai
+    url = st.secrets.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_ANON_KEY")
+    # 2) Sekcija [supabase]
+    if (not url or not key) and "supabase" in st.secrets and isinstance(st.secrets["supabase"], dict):
+        url = url or st.secrets["supabase"].get("url") or st.secrets["supabase"].get("SUPABASE_URL")
+        key = key or st.secrets["supabase"].get("anon_key") or st.secrets["supabase"].get("SUPABASE_ANON_KEY")
+    # 3) ENV fallback (lokaliam dev)
+    url = url or os.environ.get("SUPABASE_URL")
+    key = key or os.environ.get("SUPABASE_ANON_KEY")
 
-supabase = get_supabase()
+    if not url or not key:
+        st.error(
+            "❌ Supabase konfigūracija nerasta.\n\n"
+            "Palaikomi formatai (pasirink vieną):\n"
+            "A) Secrets plokščiai:\n"
+            '   SUPABASE_URL = "https://xxxxx.supabase.co"\n'
+            '   SUPABASE_ANON_KEY = "ey..."\n'
+            "B) Secrets sekcija:\n"
+            "   [supabase]\n"
+            '   url = "https://xxxxx.supabase.co"\n'
+            '   anon_key = "ey..."\n"
+        )
+        st.stop()
+    try:
+        return create_client(url, key)
+    except Exception as e:
+        st.error(f"❌ Nepavyko inicializuoti Supabase kliento: {e}")
+        st.stop()
+
+supabase: Client = get_supabase()
 
 # =========================
-# Pagalba: LT mėnesiai, money, guard
+# LT mėnesiai, formatas, guard
 # =========================
 LT_MONTHS = ["Sausis","Vasaris","Kovas","Balandis","Gegužė","Birželis",
              "Liepa","Rugpjūtis","Rugsėjis","Spalis","Lapkritis","Gruodis"]
@@ -147,7 +173,6 @@ def login_ui() -> bool:
             if res and res.session:
                 st.session_state["sb_access_token"]  = res.session.access_token
                 st.session_state["sb_refresh_token"] = res.session.refresh_token
-                st.success("Prisijungta.")
                 st.experimental_rerun()
             else:
                 st.error("Neteisingi duomenys.")
@@ -179,7 +204,8 @@ def fetch_months() -> List[str]:
     seen, months = set(), []
     for row in data:
         dval = row.get(COL_DATE)
-        if not dval: continue
+        if not dval:
+            continue
         try:
             d = pd.to_datetime(dval).to_pydatetime()
         except Exception:
@@ -196,14 +222,15 @@ def fetch_month_df(ym: str) -> pd.DataFrame:
     y, m = map(int, ym.split("-"))
     start = date(y, m, 1).isoformat()
     end = date(y + (m==12), (m % 12) + 1, 1).isoformat()
-    q = (
+    data = (
         supabase.table(TABLE)
         .select(f"id,{COL_DATE},{COL_TYPE},{COL_MERCHANT},{COL_CATEGORY},{COL_DESC},{COL_AMOUNT}")
         .gte(COL_DATE, start).lt(COL_DATE, end)
         .order(COL_DATE, desc=True)
         .limit(50000)
+        .execute()
+        .data or []
     )
-    data = q.execute().data or []
     df = pd.DataFrame(data)
     if not df.empty:
         df[COL_DATE] = pd.to_datetime(df[COL_DATE]).dt.date
@@ -212,7 +239,7 @@ def fetch_month_df(ym: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_trend_df(last_n_months: int = DEFAULT_MONTHS_TREND) -> pd.DataFrame:
-    # Paimam paskutinius N mėn. nuo šiandien
+    # Paskutiniai N mėnesių nuo šiandien
     today = date.today()
     y, m = today.year, today.month
     start_y = y
@@ -222,7 +249,6 @@ def fetch_trend_df(last_n_months: int = DEFAULT_MONTHS_TREND) -> pd.DataFrame:
         start_m += 12
     start = date(start_y, start_m, 1).isoformat()
     end = date(y + (m==12), (m % 12) + 1, 1).isoformat()
-
     data = (
         supabase.table(TABLE)
         .select(f"{COL_DATE},{COL_TYPE},{COL_AMOUNT}")
@@ -241,32 +267,27 @@ def fetch_trend_df(last_n_months: int = DEFAULT_MONTHS_TREND) -> pd.DataFrame:
     return df
 
 # =========================
-# Diagramos (Plotly)
+# Diagramos
 # =========================
 def plot_monthly_trend(df: pd.DataFrame) -> Optional[go.Figure]:
     if df.empty:
         return None
     agg = df.groupby(["ym", COL_TYPE], as_index=False)[COL_AMOUNT].sum()
-    # užpildom trūkstamas kombinacijas, kad linijos nesutrūktų
+    # užpildom trūkstamas kombinacijas
     all_ym = sorted(agg["ym"].unique().tolist())
     for t in ["Pajamos","Išlaidos"]:
         if not ((agg[COL_TYPE] == t).any()):
-            # sukurti nulines eilutes, jei visai nėra to tipo per laikotarpį
-            missing = pd.DataFrame({ "ym": all_ym, COL_TYPE: t, COL_AMOUNT: 0.0 })
+            missing = pd.DataFrame({"ym": all_ym, COL_TYPE: t, COL_AMOUNT: 0.0})
             agg = pd.concat([agg, missing], ignore_index=True)
-    agg = agg.pivot(index="ym", columns=COL_TYPE, values=COL_AMOUNT).fillna(0.0).reset_index()
-    # balansas per mėn. (Pajamos - Išlaidos)
-    agg["Balansas"] = agg.get("Pajamos", 0.0) - agg.get("Išlaidos", 0.0)
+    pivot = agg.pivot(index="ym", columns=COL_TYPE, values=COL_AMOUNT).fillna(0.0).reset_index()
+    pivot["Balansas"] = pivot.get("Pajamos", 0.0) - pivot.get("Išlaidos", 0.0)
 
     fig = go.Figure()
-    if "Pajamos" in agg:
-        fig.add_trace(go.Scatter(x=agg["ym"], y=agg["Pajamos"], mode="lines+markers",
-                                 name="Pajamos", line=dict(width=2)))
-    if "Išlaidos" in agg:
-        fig.add_trace(go.Scatter(x=agg["ym"], y=agg["Išlaidos"], mode="lines+markers",
-                                 name="Išlaidos", line=dict(width=2)))
-    fig.add_trace(go.Bar(x=agg["ym"], y=agg["Balansas"], name="Balansas (stulpeliai)", opacity=0.35))
-
+    if "Pajamos" in pivot:
+        fig.add_trace(go.Scatter(x=pivot["ym"], y=pivot["Pajamos"], mode="lines+markers", name="Pajamos", line=dict(width=2)))
+    if "Išlaidos" in pivot:
+        fig.add_trace(go.Scatter(x=pivot["ym"], y=pivot["Išlaidos"], mode="lines+markers", name="Išlaidos", line=dict(width=2)))
+    fig.add_trace(go.Bar(x=pivot["ym"], y=pivot["Balansas"], name="Balansas (stulpeliai)", opacity=0.35))
     fig.update_layout(
         title="Mėnesinis trendas (Pajamos / Išlaidos / Balansas)",
         xaxis_title="Mėnuo",
@@ -285,12 +306,24 @@ def plot_expense_pie(df_month: pd.DataFrame) -> Optional[go.Figure]:
     if exp.empty:
         return None
     grp = exp.groupby(COL_CATEGORY, as_index=False)[COL_AMOUNT].sum().sort_values(COL_AMOUNT, ascending=False)
-    fig = px.pie(
-        grp, names=COL_CATEGORY, values=COL_AMOUNT, hole=0.5,
-        title="Išlaidų struktūra pagal kategorijas",
-    )
+    fig = px.pie(grp, names=COL_CATEGORY, values=COL_AMOUNT, hole=0.5, title="Išlaidų struktūra pagal kategorijas")
     fig.update_traces(textposition="inside", textinfo="percent+label")
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10))
+    return fig
+
+def plot_category_bars(df_month: pd.DataFrame, tlabel: str) -> Optional[go.Figure]:
+    if df_month.empty:
+        return None
+    sub = df_month[df_month[COL_TYPE] == tlabel]
+    if sub.empty:
+        return None
+    grp = sub.groupby(COL_CATEGORY, as_index=False)[COL_AMOUNT].sum().sort_values(COL_AMOUNT, ascending=True).tail(12)
+    fig = px.bar(
+        grp, x=COL_AMOUNT, y=COL_CATEGORY, orientation="h",
+        title=f"Top kategorijos: {tlabel}",
+        labels={COL_AMOUNT: f"Suma ({CURRENCY})", COL_CATEGORY: "Kategorija"},
+    )
+    fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10), yaxis=dict(autorange="reversed"))
     return fig
 
 def plot_merchant_bar(df_month: pd.DataFrame) -> Optional[go.Figure]:
@@ -309,36 +342,21 @@ def plot_merchant_bar(df_month: pd.DataFrame) -> Optional[go.Figure]:
     fig.update_layout(height=480, margin=dict(l=10, r=10, t=60, b=10), yaxis=dict(autorange="reversed"))
     return fig
 
-def plot_category_bars(df_month: pd.DataFrame, tlabel: str) -> Optional[go.Figure]:
-    if df_month.empty:
-        return None
-    sub = df_month[df_month[COL_TYPE] == tlabel]
-    if sub.empty:
-        return None
-    grp = sub.groupby(COL_CATEGORY, as_index=False)[COL_AMOUNT].sum().sort_values(COL_AMOUNT, ascending=True).tail(12)
-    fig = px.bar(
-        grp, x=COL_AMOUNT, y=COL_CATEGORY, orientation="h",
-        title=f"Top kategorijos: {tlabel}",
-        labels={COL_AMOUNT: f"Suma ({CURRENCY})", COL_CATEGORY: "Kategorija"},
-    )
-    fig.update_layout(height=420, margin=dict(l=10, r=10, t=60, b=10), yaxis=dict(autorange="reversed"))
-    return fig
-
 # =========================
-# Įrašų įvedimas
+# Įvedimas + Excel eksportas
 # =========================
 def insert_row(when: date, typ: str, category: str, merchant: str, desc: str, amount: float) -> bool:
     payload = {
         COL_DATE: when.isoformat(),
         COL_TYPE: typ,                                              # 'Pajamos' | 'Išlaidos'
         COL_CATEGORY: (category or "").strip() or "Nežinoma",
-        COL_MERCHANT: (merchant or "").strip(),                     # NOT NULL DEFAULT '' – laikom tuščią
-        COL_DESC: (desc or "").strip(),                             # NOT NULL DEFAULT ''
+        COL_MERCHANT: (merchant or "").strip(),                     # laikom tuščią, NOT NULL default ''
+        COL_DESC: (desc or "").strip(),                             # NOT NULL default ''
         COL_AMOUNT: float(amount),
     }
     try:
         res = supabase.table(TABLE).insert(payload).execute()
-        # unikalaus rakto atvejis
+        # unikalaus rakto atvejis (biudzetas_natural_key_uk)
         if getattr(res, "error", None):
             msg = str(res.error)
             if "biudzetas_natural_key_uk" in msg or "duplicate key value" in msg.lower():
@@ -376,12 +394,10 @@ def entry_form():
         ok = insert_row(dval, tval, cat, merch, desc, aval)
         if ok:
             st.success("Įrašyta.")
-            # atnaujinam cache’us
             fetch_months.clear(); fetch_month_df.clear(); fetch_trend_df.clear()
+        else:
+            st.warning("Įrašas neįrašytas.")
 
-# =========================
-# Excel eksportas (pasirenkama)
-# =========================
 def to_excel_bytes(df: pd.DataFrame, sheet_name="Duomenys") -> bytes:
     if df.empty:
         return b""
@@ -396,10 +412,8 @@ def to_excel_bytes(df: pd.DataFrame, sheet_name="Duomenys") -> bytes:
 # =========================
 def main():
     # Auth
-    hydrate_session_from_state()
-    if not current_session():
-        if not login_ui():
-            st.stop()
+    if not login_ui():
+        st.stop()
     logout_ui()
 
     st.title("💶 Asmeninis biudžetas")
@@ -432,7 +446,7 @@ def main():
         st.info("Pasirinkite mėnesį.")
         st.stop()
 
-    # === Suvestinė (KPI) ===
+    # Suvestinė
     df_month = fetch_month_df(selected_month)
     s_inc = float(df_month.loc[df_month[COL_TYPE] == "Pajamos", COL_AMOUNT].sum()) if not df_month.empty else 0.0
     s_exp = float(df_month.loc[df_month[COL_TYPE] == "Išlaidos", COL_AMOUNT].sum()) if not df_month.empty else 0.0
@@ -444,18 +458,16 @@ def main():
     k2.metric("Išlaidos", money(s_exp))
     k3.metric("Balansas", money(s_bal))
 
-    # === Diagramos blokas ===
+    # Diagramos
     st.markdown("## 📈 Diagramos")
 
-    # 1) Mėnesinis trendas (paskutiniai N mėn.)
     df_trend = fetch_trend_df(trend_window)
     fig_trend = plot_monthly_trend(df_trend)
     if fig_trend is None:
-        st.info("Trendo grafiko nėra – trūksta duomenų pasirinktam laikotarpiui.")
+        st.info("Trendo grafiko nėra – trūksta duomenų pasirinktame laikotarpyje.")
     else:
         st.plotly_chart(fig_trend, use_container_width=True, theme=None)
 
-    # 2) Išlaidų struktūra (donut)
     cL, cR = st.columns([1.1, 1], gap="large")
     with cL:
         fig_pie = plot_expense_pie(df_month)
@@ -463,8 +475,6 @@ def main():
             st.info("Šiame mėnesyje išlaidų nėra – skritulinė diagrama neturi ką rodyti.")
         else:
             st.plotly_chart(fig_pie, use_container_width=True, theme=None)
-
-    # 3) Top kategorijos (išlaidos) ir (pajamos)
     with cR:
         tabs = st.tabs(["Išlaidos (Top)", "Pajamos (Top)"])
         with tabs[0]:
@@ -480,7 +490,6 @@ def main():
             else:
                 st.plotly_chart(fig_c_inc, use_container_width=True, theme=None)
 
-    # 4) Prekybos centrai (Top 12)
     st.markdown("### 🛒 Išlaidos pagal prekybos centrą")
     fig_merch = plot_merchant_bar(df_month)
     if fig_merch is None:
@@ -488,7 +497,7 @@ def main():
     else:
         st.plotly_chart(fig_merch, use_container_width=True, theme=None)
 
-    # 5) Operacijų lentelė + eksportas
+    # Lentelė + Excel
     st.markdown("## 🧾 Operacijų sąrašas")
     if df_month.empty:
         st.info("Šiam mėnesiui operacijų nėra.")
@@ -515,10 +524,9 @@ def main():
             except Exception as e:
                 st.warning(f"Excel eksportas nepavyko: {e}")
 
-    # Debug
-    with st.expander("🧪 Debug"):
-        st.write({"selected_month": selected_month, "trend_window": trend_window})
+    # Debug expander (jei reikės)
+    # with st.expander("🧪 Debug"):
+    #     st.write({"selected_month": selected_month, "months": months[:6], "trend_window": trend_window})
 
 if __name__ == "__main__":
     main()
-
