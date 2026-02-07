@@ -1,3 +1,20 @@
+import os, sys
+import streamlit as st
+
+st.write("DEBUG VERSION MARKER: v2026-02-07-1")  # keisk skaičių kiekvieną kartą, kai redeploy'ini
+st.write("DEBUG __file__:", __file__)
+st.write("DEBUG CWD:", os.getcwd())
+st.write("DEBUG listdir(__dir__):", os.listdir(os.path.dirname(os.path.abspath(__file__)))[:50])
+st.write("DEBUG sys.path head:", sys.path[:3])
+
+
+
+
+
+
+
+
+
 # -*- coding: utf-8 -*-
 # Asmeninis biudžetas — vieno failo Streamlit aplikacija be išorinių importų (auth integruotas)
 # Sukurta taip, kad veiktų Streamlit Cloud be papildomų kelių ar paketų.
