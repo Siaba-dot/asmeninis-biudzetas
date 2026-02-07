@@ -6,11 +6,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 from datetime import date
-from typing import List, Optional, Dict
+from typing import List, Optional
 from supabase import create_client, Client
 
 # =========================
-# KONFIGŪRA – tavo 'public.biudzetas'
+# KONFIGŪRA – 'public.biudzetas'
 # =========================
 TABLE            = "biudzetas"
 COL_DATE         = "data"               # DATE
@@ -21,9 +21,9 @@ COL_DESC         = "aprasymas"          # TEXT (NOT NULL DEFAULT '')
 COL_AMOUNT       = "suma_eur"           # NUMERIC(12,2)
 
 CURRENCY         = "€"
-DEFAULT_MONTHS_TREND = 12               # trendo langas (mėn.)
+DEFAULT_MONTHS_TREND = 12               # kiek mėnesių rodyti trendo grafike
 SHOW_ENTRY_FORM  = True                 # rodyti įvedimo formą
-SHOW_EXPORT_XLSX = True                 # leisti mėnesio lentelės eksportą į Excel
+SHOW_EXPORT_XLSX = True                 # leisti mėnesio lentelei eksportą į Excel
 
 # =========================
 # PUSLAPIO NUSTATYMAI + STILIUS
@@ -56,7 +56,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Plotly tema
+# Plotly dark-neon tema
 pio.templates["neon_dark"] = go.layout.Template(
     layout=dict(
         paper_bgcolor="#0f1226",
@@ -71,7 +71,7 @@ pio.templates["neon_dark"] = go.layout.Template(
 pio.templates.default = "neon_dark"
 
 # =========================
-# Supabase inicializacija: palaiko flat ir [supabase] sekciją
+# Supabase inicializacija (palaiko flat ir [supabase] sekciją)
 # =========================
 @st.cache_resource(show_spinner=False)
 def get_supabase() -> Client:
@@ -90,15 +90,18 @@ def get_supabase() -> Client:
         st.error(
             "❌ Supabase konfigūracija nerasta.\n\n"
             "Palaikomi formatai (pasirink vieną):\n"
-            "A) Secrets plokščiai:\n"
+            "A) Secrets (plokščiai):\n"
             '   SUPABASE_URL = "https://xxxxx.supabase.co"\n'
             '   SUPABASE_ANON_KEY = "ey..."\n'
-            "B) Secrets sekcija:\n"
-            "   [supabase]\n"
-            '   url = "https://xxxxx.supabase.co"\n'
-            '   anon_key = "ey..."\n"
+            "B) Secrets (sekcija):\n"
+            "[supabase]\n"
+            'url = "https://xxxxx.supabase.co"\n'
+            'anon_key = "ey..."\n'
+            "\nCloud: Manage app → Settings → Secrets\n"
+            "Lokalus dev: .streamlit/secrets.toml"
         )
         st.stop()
+
     try:
         return create_client(url, key)
     except Exception as e:
@@ -108,7 +111,7 @@ def get_supabase() -> Client:
 supabase: Client = get_supabase()
 
 # =========================
-# LT mėnesiai, formatas, guard
+# LT mėnesiai, formatavimas, guard
 # =========================
 LT_MONTHS = ["Sausis","Vasaris","Kovas","Balandis","Gegužė","Birželis",
              "Liepa","Rugpjūtis","Rugsėjis","Spalis","Lapkritis","Gruodis"]
@@ -182,10 +185,13 @@ def login_ui() -> bool:
 
 def logout_ui():
     if st.sidebar.button("Atsijungti", use_container_width=True):
-        try: supabase.auth.sign_out()
-        except Exception: pass
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
         for k in ("sb_access_token","sb_refresh_token"):
-            if k in st.session_state: del st.session_state[k]
+            if k in st.session_state:
+                del st.session_state[k]
         st.experimental_rerun()
 
 # =========================
@@ -273,7 +279,7 @@ def plot_monthly_trend(df: pd.DataFrame) -> Optional[go.Figure]:
     if df.empty:
         return None
     agg = df.groupby(["ym", COL_TYPE], as_index=False)[COL_AMOUNT].sum()
-    # užpildom trūkstamas kombinacijas
+    # užpildom trūkstamas kombinacijas, kad linijos nesutrūktų
     all_ym = sorted(agg["ym"].unique().tolist())
     for t in ["Pajamos","Išlaidos"]:
         if not ((agg[COL_TYPE] == t).any()):
@@ -350,13 +356,13 @@ def insert_row(when: date, typ: str, category: str, merchant: str, desc: str, am
         COL_DATE: when.isoformat(),
         COL_TYPE: typ,                                              # 'Pajamos' | 'Išlaidos'
         COL_CATEGORY: (category or "").strip() or "Nežinoma",
-        COL_MERCHANT: (merchant or "").strip(),                     # laikom tuščią, NOT NULL default ''
+        COL_MERCHANT: (merchant or "").strip(),                     # laikom tuščią (NOT NULL default '')
         COL_DESC: (desc or "").strip(),                             # NOT NULL default ''
         COL_AMOUNT: float(amount),
     }
     try:
         res = supabase.table(TABLE).insert(payload).execute()
-        # unikalaus rakto atvejis (biudzetas_natural_key_uk)
+        # Unikalumo raktas biudzetas_natural_key_uk
         if getattr(res, "error", None):
             msg = str(res.error)
             if "biudzetas_natural_key_uk" in msg or "duplicate key value" in msg.lower():
@@ -523,10 +529,6 @@ def main():
                 )
             except Exception as e:
                 st.warning(f"Excel eksportas nepavyko: {e}")
-
-    # Debug expander (jei reikės)
-    # with st.expander("🧪 Debug"):
-    #     st.write({"selected_month": selected_month, "months": months[:6], "trend_window": trend_window})
 
 if __name__ == "__main__":
     main()
