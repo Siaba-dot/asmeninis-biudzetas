@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
 from datetime import date
 from supabase import create_client
 from supabase.client import Client
@@ -36,7 +34,7 @@ def login(email: str, password: str) -> bool:
 def logout():
     supabase.auth.sign_out()
     st.session_state.clear()
-    st.rerun()
+    st.experimental_rerun()
 
 if "authenticated" not in st.session_state:
     st.title("🔐 Prisijungimas")
@@ -46,7 +44,7 @@ if "authenticated" not in st.session_state:
         if email and password and login(email, password):
             st.session_state["authenticated"] = True
             st.session_state["email"] = email
-            st.rerun()
+            st.experimental_rerun()
         else:
             st.error("❌ Neteisingi duomenys")
     st.stop()
@@ -109,6 +107,9 @@ def entry_form():
         ok = insert_row(dval, tval, cat, merch, desc, aval)
         if ok:
             st.success("Įrašyta!")
+            # Nuvalo cache, kad iš karto parodytų naujus duomenis
+            fetch_months.clear()
+            fetch_month_df.clear()
         else:
             st.warning("Įrašas neįrašytas.")
 
@@ -175,8 +176,8 @@ if not df_month.empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# Diagramos – pavyzdys
-if not df_month.empty:
-    fig = px.pie(df_month[df_month["tipas"]=="Išlaidos"], names="kategorija", values="suma_eur",
-                 title="Išlaidos pagal kategorijas", hole=0.5)
-    st.plotly_chart(fig, use_container_width=True)
+    # Diagrama Pajamos vs Išlaidos
+    if not df_month.empty:
+        agg = df_month.groupby("tipas")["suma_eur"].sum().reset_index()
+        fig2 = px.bar(agg, x="tipas", y="suma_eur", title="Pajamos vs Išlaidos", text="suma_eur")
+        st.plotly_chart(fig2, use_container_width=True)
