@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Asmeninis biudžetas — vieno failo Streamlit aplikacija
 # Autentifikacija tik per st.secrets (be jokių jautrių duomenų kode).
-# Palaikomi slaptažodžiai: plaintext (password) ARBA bcrypt hash (password_hash).
+# DB eksportas: Supabase (Postgres) per st.secrets.
 
 from datetime import datetime, date
 from io import BytesIO
@@ -180,7 +180,6 @@ def _init_budget_state():
     if "opening_overrides" not in st.session_state:
         st.session_state.opening_overrides = {}  # {'YYYY-MM': float}
     if "selected_month" not in st.session_state:
-        # Jei nėra įrašų – šiandienos mėnuo
         st.session_state.selected_month = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
 
 def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -283,7 +282,95 @@ def available_months(df: pd.DataFrame):
     return months or [pd.Timestamp.today().to_period("M").strftime("%Y-%m")]
 
 # ------------------------------------------------------------
-# 5) Filtrai (Sidebar)
+# 5) SUPABASE (DB) eksportas/importas
+# ------------------------------------------------------------
+def _get_supabase_client():
+    """Sukuria Supabase klientą iš st.secrets."""
+    try:
+        from supabase import create_client
+    except Exception:
+        st.error("Supabase SDK nerastas. Įtrauk `supabase>=2.4` į requirements.txt.")
+        raise
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]  # Rekomenduojama SERVICE ROLE tik server-side
+    return create_client(url, key)
+
+def _df_for_db(df: pd.DataFrame) -> pd.DataFrame:
+    """Sutvarko stulpelių pavadinimus ir tipus, kad atitiktų DB schemą."""
+    df = _ensure_columns(df).copy()
+    # Tipai
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
+    df["Tipas"] = df["Tipas"].astype(str)
+    df["Prekybos centras"] = df["Prekybos centras"].astype(str).replace({"None":"", "nan":""})
+    df["Kategorija"] = df["Kategorija"].astype(str)
+    df["Aprašymas"] = df["Aprašymas"].astype(str).replace({"None":"", "nan":""})
+    df["Suma (€)"] = pd.to_numeric(df["Suma (€)"], errors="coerce").fillna(0.0).round(2)
+
+    # Map į DB laukus
+    mapped = pd.DataFrame({
+        "data": df["Data"],
+        "tipas": df["Tipas"],
+        "prekybos_centras": df["Prekybos centras"],
+        "kategorija": df["Kategorija"],
+        "aprasymas": df["Aprašymas"],
+        "suma_eur": df["Suma (€)"],
+    }).dropna(subset=["data"])
+    return mapped
+
+def export_df_to_supabase(df: pd.DataFrame, batch_size: int = 500):
+    """Įrašo DF į Supabase lentelę per insert (dublikatus stabdo DB UNIQUE)."""
+    if df.empty:
+        return 0, 0, []
+
+    sb = _get_supabase_client()
+    table = st.secrets["supabase"].get("table", "biudzetas")
+    data_rows = df.to_dict(orient="records")
+
+    inserted = 0
+    skipped = 0
+    errors = []
+
+    for i in range(0, len(data_rows), batch_size):
+        chunk = data_rows[i:i+batch_size]
+        try:
+            resp = sb.table(table).insert(chunk).execute()
+            if hasattr(resp, "data") and resp.data:
+                inserted += len(resp.data)
+            else:
+                inserted += len(chunk)
+        except Exception as e:
+            errors.append(str(e))
+            skipped += len(chunk)
+
+    return inserted, skipped, errors
+
+def render_import_to_db():
+    st.markdown("### Importas iš Excel į DB")
+    f = st.file_uploader("Pasirink Excel (.xlsx)", type=["xlsx"])
+    if not f:
+        st.caption("Laukiami stulpeliai: Data, Tipas, Prekybos centras, Kategorija, Aprašymas, Suma (€)")
+        return
+    try:
+        df = pd.read_excel(f, engine="openpyxl")
+        st.dataframe(df.head(10), use_container_width=True, hide_index=True)
+        safe_df = _df_for_db(df)
+        st.caption(f"Paruošta įrašų: {len(safe_df)}")
+
+        if st.button("⬆️ Importuoti šį Excel į DB", type="primary", use_container_width=True):
+            with st.status("Importuojama į DB...", expanded=True) as status:
+                ins, skip, errs = export_df_to_supabase(safe_df)
+                st.write(f"✅ Įrašyta: **{ins}**")
+                st.write(f"⚠️ Praleista (galimai dublikatai): **{skip}**")
+                if errs:
+                    with st.expander("Klaidos (techninė info)"):
+                        for e in errs[:10]:
+                            st.code(e)
+                status.update(label="Baigta", state="complete")
+    except Exception as e:
+        st.error(f"Importo klaida: {e}")
+
+# ------------------------------------------------------------
+# 6) Filtrai (Sidebar)
 # ------------------------------------------------------------
 def _filters_ui(df: pd.DataFrame) -> pd.DataFrame:
     """Filtrai šoninėje juostoje: data, tipas, kategorijos, prekybos centrai, suma, paieška."""
@@ -366,7 +453,7 @@ def _filters_ui(df: pd.DataFrame) -> pd.DataFrame:
     return f.drop(columns=["Data_dt", "Data_dt_full"], errors="ignore")
 
 # ------------------------------------------------------------
-# 6) UI komponentai
+# 7) UI komponentai
 # ------------------------------------------------------------
 def render_topbar(months):
     left, mid, right = st.columns([1.4, 2, 1.2])
@@ -437,23 +524,28 @@ def render_balance_settings():
 def render_budget_form():
     st.markdown("### Naujas įrašas")
 
-    c1, c2, c3, c4, c5, c6 = st.columns([1.0, 0.9, 1.2, 1.2, 2.2, 0.9])
-    with c1:
+    # 1 eilė: Data | Tipas (radio) | Kategorija | Suma
+    a1, a2, a3, a4 = st.columns([1.0, 2.0, 1.8, 1.0])
+    with a1:
         dt = st.date_input("Data", value=datetime.today(), format="YYYY-MM-DD")
-    with c2:
-        ttype = st.selectbox("Tipas", ["Pajamos", "Išlaidos"], index=1)
-    with c3:
+    with a2:
+        ttype = st.radio("Tipas", ["Pajamos", "Išlaidos"], index=1, horizontal=True)
+    with a3:
         cat_options = INCOME_CATS if ttype == "Pajamos" else EXPENSE_CATS
         category = st.selectbox("Kategorija", options=cat_options, index=0)
-    with c4:
-        store = st.text_input("Prekybos centras", placeholder="pvz., Rimi, Maxima, Lidl, Iki")
-    with c5:
-        note = st.text_input("Aprašymas", placeholder="Trumpas paaiškinimas (nebūtina)")
-    with c6:
+    with a4:
         amount = st.number_input("Suma (€)", min_value=0.00, value=0.00, step=0.10, format="%.2f")
 
-    c7, c8 = st.columns([1, 1])
-    with c7:
+    # 2 eilė: Prekybos centras | Aprašymas
+    b1, b2 = st.columns([1.6, 3.4])
+    with b1:
+        store = st.text_input("Prekybos centras", placeholder="pvz., Rimi, Maxima, Lidl, Iki")
+    with b2:
+        note = st.text_input("Aprašymas", placeholder="Trumpas paaiškinimas (nebūtina)")
+
+    # Mygtukai
+    c1, c2 = st.columns([1, 1])
+    with c1:
         if st.button("➕ Pridėti", use_container_width=True):
             if amount <= 0:
                 st.warning("Suma turi būti didesnė už 0.")
@@ -461,7 +553,7 @@ def render_budget_form():
                 add_transaction_row(dt, ttype, store, category, note, amount)
                 st.success("Įrašas pridėtas.")
                 st.rerun()
-    with c8:
+    with c2:
         if st.button("🧹 Išvalyti visus įrašus", use_container_width=True):
             st.session_state.budget_df = st.session_state.budget_df.iloc[0:0].copy()
             st.rerun()
@@ -615,8 +707,24 @@ def render_export():
     except Exception:
         st.caption("Excel eksportui reikia `openpyxl`. Įtrauk į requirements.txt, jei mygtukas neveikia.")
 
+    # --- Eksportas į DB (Supabase) ---
+    st.markdown("---")
+    st.subheader("Eksportas į duomenų bazę")
+    safe_df = _df_for_db(df)
+    if st.button("⬆️ Eksportuoti į DB (Supabase)", use_container_width=True, type="primary"):
+        with st.status("Eksportuojama į DB...", expanded=True) as status:
+            st.write("Ruošiam duomenis…")
+            ins, skip, errs = export_df_to_supabase(safe_df)
+            st.write(f"✅ Įrašyta: **{ins}**")
+            st.write(f"⚠️ Praleista (galimai dublikatai): **{skip}**")
+            if errs:
+                with st.expander("Klaidos (techninė info)"):
+                    for e in errs[:10]:
+                        st.code(e)
+            status.update(label="Baigta", state="complete")
+
 # ------------------------------------------------------------
-# 7) App paleidimas
+# 8) App paleidimas
 # ------------------------------------------------------------
 def main():
     _init_auth_state()
@@ -633,7 +741,7 @@ def main():
         st.session_state.selected_month = months[-1]
     render_topbar(months)
 
-    # Pagrindinis išdėstymas: kairė (nustatymai, forma, eksportas), dešinė (suvestinė, lentelė, diagramos)
+    # Pagrindinis išdėstymas: kairė (nustatymai, forma, eksportas, importas), dešinė (suvestinė, lentelė, diagramos)
     with st.container():
         left, right = st.columns([1.05, 1.95])
 
@@ -643,6 +751,8 @@ def main():
             render_budget_form()
             st.markdown("---")
             render_export()
+            st.markdown("---")
+            render_import_to_db()
 
         with right:
             render_month_header_and_metrics()
@@ -653,7 +763,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
- 
-   
-
