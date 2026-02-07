@@ -1,7 +1,7 @@
 # auth.py
 import streamlit as st
 from supabase import Client
-from typing import Optional
+from typing import Optional, Any
 
 # --- Sesijos helperiai ---
 def get_session():
@@ -9,8 +9,20 @@ def get_session():
     return st.session_state.get("sb_session")
 
 def set_session(session):
-    """Išsaugok sesiją į session_state."""
-    st.session_state["sb_session"] = session
+    """
+    Išsaugok sesiją į session_state.
+    Jei tai pydantic modelis – konvertuojam į dict, kad vėliau netrūktų .get().
+    """
+    try:
+        # Pydantic v2
+        st.session_state["sb_session"] = session.model_dump()
+    except Exception:
+        try:
+            # Pydantic v1
+            st.session_state["sb_session"] = session.dict()
+        except Exception:
+            # Jei jau yra dict arba paprastas objektas – saugom tiesiogiai
+            st.session_state["sb_session"] = session
 
 def clear_session():
     st.session_state.pop("sb_session", None)
@@ -45,19 +57,38 @@ def send_magic_link(supabase: Client, email: str) -> Optional[str]:
     except Exception as e:
         return str(e)
 
+# --- Vidinis helperis: saugiai paimti access_token ---
+def _get_token_from_session(sb_sess: Any):
+    if sb_sess is None:
+        return None
+    # dict atvejis
+    if isinstance(sb_sess, dict):
+        return sb_sess.get("access_token")
+    # pydantic modelis ar kitas objektas
+    return getattr(sb_sess, "access_token", None)
+
 # --- UI ---
 def render_auth_ui(supabase: Client) -> bool:
     """
     Rodo login UI jei vartotojas NE prisijungęs.
     Grąžina True, jei prisijungta; False, jei dar reikia prisijungti.
     """
-    # Jei turime sesiją — pabandom gauti user'į (patikrinti ar token dar galioja)
+    # 1) Tiesioginis patikrinimas: jei get_user suveikia – esam prisijungę
+    try:
+        supabase.auth.get_user()
+        return True
+    except Exception:
+        pass  # neturim galiojančios sesijos supabase kliente – rodysim UI
+
+    # 2) Fallback: jei turim cache'intą sesiją – pabandykim vėl
     sb_sess = get_session()
-    if sb_sess and sb_sess.get("access_token"):
+    token = _get_token_from_session(sb_sess)
+    if token:
         try:
             supabase.auth.get_user()
             return True
         except Exception:
+            # Sesija pasibaigė ar neteisinga – išvalom ir rodome login UI
             sign_out(supabase)
 
     st.markdown("### Prisijungimas")
