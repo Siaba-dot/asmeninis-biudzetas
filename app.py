@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------
-# 2) Minimalus stilius — kompaktiškas išdėstymas (neprivaloma)
+# 2) Minimalus stilius — kompaktiškas išdėstymas
 # ------------------------------------------------------------
 st.markdown(
     """
@@ -41,20 +41,8 @@ st.markdown(
 
 # ------------------------------------------------------------
 # 3) Autentifikacija per st.secrets
-#    Secrets pavyzdžiai (Cloud -> Manage app -> Settings -> Secrets):
-#    [auth]
-#    users = [
-#      { email = "sigita.abasoviene@gmail.com", password = "Sau*leta-2025" }
-#    ]
-#
-#    ARBA su bcrypt hash (reikia į requirements.txt įtraukti bcrypt>=4.0):
-#    [auth]
-#    users = [
-#      { email = "sigita@pastas.lt", password_hash = "$2b$12$...." }
-#    ]
 # ------------------------------------------------------------
 def _read_users_from_secrets():
-    """Grąžina vartotojų sąrašą iš st.secrets. Jei neranda, grąžina []."""
     try:
         users = st.secrets["auth"]["users"]
         if not isinstance(users, (list, tuple)):
@@ -72,7 +60,6 @@ def _read_users_from_secrets():
         return []
 
 def _bcrypt_check(password, password_hash):
-    """Tikrina bcrypt hash; jei bcrypt neįdiegtas, grąžina False."""
     try:
         import bcrypt
     except Exception:
@@ -87,7 +74,6 @@ def _bcrypt_check(password, password_hash):
         return False
 
 def _is_valid_credentials(email: str, password: str) -> bool:
-    """Leidžia prisijungti, jei el. paštas + slaptažodis atitinka secrets (case-insensitive email)."""
     email = (email or "").strip().lower()
     password = (password or "")
     if not email or not password:
@@ -156,23 +142,59 @@ users = [
             st.error("Neteisingi prisijungimo duomenys.")
 
 def sign_out():
-    # Stabilus atsijungimas: be experimental_rerun ir be on_click callback.
     st.session_state.auth = {"is_authenticated": False, "user_email": None, "ts": None}
     st.rerun()
 
 # ------------------------------------------------------------
-# 4) Biudžeto logika
+# 4) Biudžeto duomenys + mėnesio likučiai
 # ------------------------------------------------------------
+INCOME_CATS = [
+    "Atlyginimas",
+    "Avansas",
+    "Papildomos pajamos",
+    "Dovanos",
+    "Kita (pajamos)",
+]
+
+EXPENSE_CATS = [
+    "Kreditai",
+    "Draudimas",
+    "Paslaugos",
+    "Maistas",
+    "Transportas",
+    "Nenumatytos išlaidos",
+    "Dovanos",
+    "Kita (išlaidos)",
+]
+
 def _init_budget_state():
     if "budget_df" not in st.session_state:
         st.session_state.budget_df = pd.DataFrame(
-            columns=["Data", "Tipas", "Kategorija", "Aprašymas", "Suma (€)"]
+            columns=["Data", "Tipas", "Prekybos centras", "Kategorija", "Aprašymas", "Suma (€)"]
         )
+    if "initial_balance" not in st.session_state:
+        st.session_state.initial_balance = 0.00  # vienkartinis pirmam mėnesiui
+    if "opening_overrides" not in st.session_state:
+        st.session_state.opening_overrides = {}  # {'YYYY-MM': float}
 
-def add_transaction_row(dt: date, ttype: str, category: str, note: str, amount: float):
+def _ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
+    needed = ["Data", "Tipas", "Prekybos centras", "Kategorija", "Aprašymas", "Suma (€)"]
+    for col in needed:
+        if col not in df.columns:
+            df[col] = "" if col != "Suma (€)" else 0.0
+    return df[needed]
+
+def _month_key_from_str(s: str) -> str:
+    dt = pd.to_datetime(s, errors="coerce")
+    if pd.isna(dt):
+        return ""
+    return dt.to_period("M").strftime("%Y-%m")
+
+def add_transaction_row(dt: date, ttype: str, store: str, category: str, note: str, amount: float):
     row = {
         "Data": dt.strftime("%Y-%m-%d"),
         "Tipas": ttype,
+        "Prekybos centras": (store or "").strip(),
         "Kategorija": (category or "").strip(),
         "Aprašymas": (note or "").strip(),
         "Suma (€)": round(float(amount), 2),
@@ -181,6 +203,7 @@ def add_transaction_row(dt: date, ttype: str, category: str, note: str, amount: 
         [st.session_state.budget_df, pd.DataFrame([row])],
         ignore_index=True,
     )
+    st.session_state.budget_df = _ensure_columns(st.session_state.budget_df)
 
 def compute_summary(df: pd.DataFrame):
     if df.empty:
@@ -190,60 +213,236 @@ def compute_summary(df: pd.DataFrame):
     balansas = round(pajamos - islaidos, 2)
     return round(pajamos, 2), round(islaidos, 2), balansas
 
+def compute_monthly_balances(df: pd.DataFrame, initial_balance: float, overrides: dict):
+    """
+    Grąžina:
+      months -> dict su:
+        {
+          'pajamos': float,
+          'islaidos': float,
+          'opening': float,
+          'closing': float
+        }
+    opening: overrides.get(m, prev_closing) arba initial_balance pirmajam.
+    """
+    if df.empty:
+        return {}
+
+    tmp = df.copy()
+    tmp["Data_dt"] = pd.to_datetime(tmp["Data"], errors="coerce")
+    tmp = tmp.dropna(subset=["Data_dt"])
+    if tmp.empty:
+        return {}
+
+    tmp["Mėnuo"] = tmp["Data_dt"].dt.to_period("M").astype(str)
+    # sumos per mėnesį ir tipą
+    piv = tmp.pivot_table(index="Mėnuo", columns="Tipas", values="Suma (€)", aggfunc="sum", fill_value=0.0)
+    # užtikrinam stulpelius
+    for col in ["Pajamos", "Išlaidos"]:
+        if col not in piv.columns:
+            piv[col] = 0.0
+    piv = piv.sort_index()
+
+    result = {}
+    prev_closing = None
+    for m in piv.index.tolist():
+        paj = float(piv.loc[m, "Pajamos"])
+        isl = float(piv.loc[m, "Išlaidos"])
+        opening = None
+
+        if isinstance(overrides, dict) and m in overrides:
+            opening = float(overrides[m])
+        elif prev_closing is not None:
+            opening = float(prev_closing)
+        else:
+            opening = float(initial_balance)
+
+        closing = round(opening + paj - isl, 2)
+        result[m] = {
+            "pajamos": round(paj, 2),
+            "islaidos": round(isl, 2),
+            "opening": round(opening, 2),
+            "closing": closing,
+        }
+        prev_closing = closing
+
+    return result
+
+def available_months(df: pd.DataFrame):
+    if df.empty:
+        today_m = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+        return [today_m]
+    m = df["Data"].apply(_month_key_from_str)
+    months = sorted([x for x in m.unique() if x])
+    return months or [pd.Timestamp.today().to_period("M").strftime("%Y-%m")]
+
 # ------------------------------------------------------------
 # 5) UI komponentai
 # ------------------------------------------------------------
-def render_topbar():
-    left, mid, right = st.columns([1.2, 2, 1])
+def render_topbar(month_selected: str):
+    left, mid, right = st.columns([1.4, 2, 1.2])
     with left:
         st.markdown("## 💶 Asmeninis biudžetas")
     with mid:
-        st.caption("")
+        st.selectbox("Mėnuo", options=available_months(_ensure_columns(st.session_state.budget_df)),
+                     index=max(available_months(_ensure_columns(st.session_state.budget_df)).index(month_selected)
+                               if month_selected in available_months(_ensure_columns(st.session_state.budget_df)) else 0, 0),
+                     key="selected_month")
     with right:
         user = st.session_state.auth.get("user_email")
         st.caption(f"Prisijungta: **{user}**" if user else "")
-        # Svarbu: be on_click callback — taip išvengiam session_state callback klaidų
         if st.button("Atsijungti", use_container_width=True, key="btn_signout"):
             sign_out()
 
+def render_balance_settings():
+    st.markdown("### Likučio nustatymai")
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        st.number_input(
+            "Pradinis likutis (pirmajam mėnesiui)",
+            min_value=-1_000_000.0,
+            max_value=1_000_000.0,
+            step=10.0,
+            value=float(st.session_state.initial_balance),
+            key="initial_balance",
+            help="Naudojamas tik pirmam mėnesiui, jei nenurodytas perrašymas.",
+        )
+    with c2:
+        # perrašymas tik dabartiniam pasirinktam mėnesiui
+        cur_m = st.session_state.get("selected_month") or available_months(st.session_state.budget_df)[0]
+        cur_val = float(st.session_state.opening_overrides.get(cur_m, 0.0))
+        new_val = st.number_input(
+            f"Šio mėnesio pradžios likutis ({cur_m})",
+            min_value=-1_000_000.0,
+            max_value=1_000_000.0,
+            step=10.0,
+            value=cur_val,
+            key="override_input",
+            help="Jei nori priverstinai nurodyti šio mėnesio pradžią.",
+        )
+    with c3:
+        colA, colB = st.columns([1, 1])
+        with colA:
+            if st.button("💾 Išsaugoti šio mėn. pradžią", use_container_width=True):
+                cur_m = st.session_state.get("selected_month")
+                st.session_state.opening_overrides[cur_m] = float(st.session_state.override_input)
+                st.success(f"Išsaugota {cur_m} pradžia: {st.session_state.override_input:.2f} €")
+                st.rerun()
+        with colB:
+            if st.button("♻️ Pašalinti šio mėn. perrašymą", use_container_width=True):
+                cur_m = st.session_state.get("selected_month")
+                if cur_m in st.session_state.opening_overrides:
+                    st.session_state.opening_overrides.pop(cur_m, None)
+                    st.success(f"Pašalintas {cur_m} pradžios perrašymas")
+                    st.rerun()
+
 def render_budget_form():
     st.markdown("### Naujas įrašas")
-    c1, c2, c3, c4, c5 = st.columns([1.1, 1, 1.2, 2, 1.1])
+
+    c1, c2, c3, c4, c5, c6 = st.columns([1.0, 0.9, 1.2, 1.2, 2.2, 0.9])
     with c1:
         dt = st.date_input("Data", value=datetime.today(), format="YYYY-MM-DD")
     with c2:
         ttype = st.selectbox("Tipas", ["Pajamos", "Išlaidos"], index=1)
     with c3:
-        category = st.text_input("Kategorija", placeholder="pvz., Maistas, Nuoma, Alga")
+        cat_options = INCOME_CATS if ttype == "Pajamos" else EXPENSE_CATS
+        category = st.selectbox("Kategorija", options=cat_options, index=0)
     with c4:
-        note = st.text_input("Aprašymas", placeholder="Trumpas paaiškinimas")
+        store = st.text_input("Prekybos centras", placeholder="pvz., Rimi, Maxima, Lidl, Iki")
     with c5:
+        note = st.text_input("Aprašymas", placeholder="Trumpas paaiškinimas (nebūtina)")
+    with c6:
         amount = st.number_input("Suma (€)", min_value=0.00, value=0.00, step=0.10, format="%.2f")
 
-    c6, c7 = st.columns([1, 1])
-    with c6:
+    c7, c8 = st.columns([1, 1])
+    with c7:
         if st.button("➕ Pridėti", use_container_width=True):
             if amount <= 0:
                 st.warning("Suma turi būti didesnė už 0.")
-            elif not (category or "").strip():
-                st.warning("Įvesk kategoriją.")
             else:
-                add_transaction_row(dt, ttype, category, note, amount)
+                add_transaction_row(dt, ttype, store, category, note, amount)
                 st.success("Įrašas pridėtas.")
                 st.rerun()
-    with c7:
+    with c8:
         if st.button("🧹 Išvalyti visus įrašus", use_container_width=True):
             st.session_state.budget_df = st.session_state.budget_df.iloc[0:0].copy()
             st.rerun()
 
+def _filters_ui(df: pd.DataFrame):
+    st.markdown("### Filtrai")
+    if df.empty:
+        st.caption("Filtrai bus aktyvūs, kai atsiras įrašų.")
+        return df
+
+    # Datos intervalas
+    df_dates = pd.to_datetime(df["Data"], errors="coerce")
+    min_d, max_d = df_dates.min().date(), df_dates.max().date()
+    col1, col2, col3 = st.columns([1.1, 1, 2])
+    with col1:
+        start_end = st.date_input("Laikotarpis", value=(min_d, max_d), min_value=min_d, max_value=max_d)
+        if isinstance(start_end, tuple) and len(start_end) == 2:
+            start_d, end_d = start_end
+        else:
+            start_d, end_d = min_d, max_d
+    with col2:
+        tipos = st.multiselect("Tipas", ["Pajamos", "Išlaidos"], default=["Pajamos", "Išlaidos"])
+    with col3:
+        cats = sorted([c for c in df["Kategorija"].dropna().unique() if str(c).strip() != ""])
+        choose_cats = st.multiselect("Kategorijos (nebūtina)", cats, default=cats)
+
+    # Taikome filtrus
+    f = df.copy()
+    f["Data_dt"] = pd.to_datetime(f["Data"], errors="coerce").dt.date
+    f = f[(f["Data_dt"] >= start_d) & (f["Data_dt"] <= end_d)]
+    if tipos:
+        f = f[f["Tipas"].isin(tipos)]
+    if choose_cats:
+        f = f[f["Kategorija"].isin(choose_cats)]
+
+    return f.drop(columns=["Data_dt"], errors="ignore")
+
+def render_month_header_and_metrics():
+    df = _ensure_columns(st.session_state.budget_df)
+    months = available_months(df)
+    sel = st.session_state.get("selected_month") or months[-1]
+    st.session_state.selected_month = sel
+
+    # mėnesio balanso skaičiavimai
+    monthly = compute_monthly_balances(df, st.session_state.initial_balance, st.session_state.opening_overrides)
+    # jei dar nėra duomenų – suformuojam "tuščią" įrašą pasirinktam mėnesiui
+    if sel not in monthly:
+        monthly[sel] = {
+            "pajamos": 0.0,
+            "islaidos": 0.0,
+            "opening": float(st.session_state.opening_overrides.get(sel,
+                      st.session_state.initial_balance if len(monthly) == 0
+                      else list(monthly.values())[-1]["closing"])),
+            "closing": 0.0,
+        }
+        monthly[sel]["closing"] = round(monthly[sel]["opening"] + 0.0 - 0.0, 2)
+
+    cur = monthly[sel]
+
+    st.markdown("### Mėnesio suvestinė")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Pradžios likutis", f"{cur['opening']:,.2f} €")
+    with c2:
+        st.metric("Pajamos", f"{cur['pajamos']:,.2f} €")
+    with c3:
+        st.metric("Išlaidos", f"{cur['islaidos']:,.2f} €")
+    with c4:
+        st.metric("Pabaigos likutis", f"{cur['closing']:,.2f} €",
+                  delta=f"{(cur['pajamos'] - cur['islaidos']):,.2f} €")
+
 def render_budget_table_and_summary():
     st.markdown("### Įrašai")
-    df = st.session_state.budget_df
+    df = _ensure_columns(st.session_state.budget_df)
     if df.empty:
         st.info("Dar nėra įrašų. Pridėk pirmą įrašą viršuje.")
     else:
         st.dataframe(
-            df.sort_values(by="Data", ascending=False),
+            df.sort_values(by=["Data"], ascending=False),
             use_container_width=True,
             hide_index=True,
         )
@@ -252,15 +451,79 @@ def render_budget_table_and_summary():
     st.markdown("---")
     s1, s2, s3 = st.columns(3)
     with s1:
-        st.metric("Pajamos", f"{pajamos:,.2f} €")
+        st.metric("Viso pajamos", f"{pajamos:,.2f} €")
     with s2:
-        st.metric("Išlaidos", f"{islaidos:,.2f} €")
+        st.metric("Viso išlaidos", f"{islaidos:,.2f} €")
     with s3:
-        st.metric("Balansas", f"{balansas:,.2f} €", delta=f"{(pajamos - islaidos):,.2f} €")
+        st.metric("Bendras balansas", f"{balansas:,.2f} €", delta=f"{(pajamos - islaidos):,.2f} €")
+
+def render_charts():
+    st.markdown("### Diagramos")
+    df = _ensure_columns(st.session_state.budget_df)
+    if df.empty:
+        st.caption("Diagramos atsiras, kai įvesi bent vieną įrašą.")
+        return
+
+    # Filtrai
+    f = _filters_ui(df)
+    st.markdown("---")
+
+    # 1) Išlaidos pagal kategoriją (filtruotas laikotarpis)
+    col1, col2 = st.columns(2)
+    with col1:
+        out_df = f[f["Tipas"] == "Išlaidos"].copy()
+        if out_df.empty:
+            st.caption("Nėra išlaidų šiame filtre.")
+        else:
+            grp = (
+                out_df.groupby("Kategorija", dropna=False)["Suma (€)"]
+                .sum()
+                .sort_values(ascending=False)
+                .reset_index()
+            )
+            grp = grp.rename(columns={"Suma (€)": "Suma"})
+            grp = grp.set_index("Kategorija")
+            st.subheader("Išlaidos pagal kategoriją (€)")
+            st.bar_chart(grp)
+
+    # 2) Išlaidos pagal prekybos centrą
+    with col2:
+        out_df2 = out_df.copy()
+        if out_df2.empty:
+            st.caption("Nėra išlaidų šiame filtre.")
+        else:
+            out_df2["Prekybos centras"] = out_df2["Prekybos centras"].apply(
+                lambda x: x.strip() if isinstance(x, str) and x.strip() else "—"
+            )
+            grp2 = (
+                out_df2.groupby("Prekybos centras", dropna=False)["Suma (€)"]
+                .sum()
+                .sort_values(ascending=False)
+                .reset_index()
+            )
+            grp2 = grp2.rename(columns={"Suma (€)": "Suma"})
+            grp2 = grp2.set_index("Prekybos centras")
+            st.subheader("Išlaidos pagal prekybos centrą (€)")
+            st.bar_chart(grp2)
+
+    # 3) Mėnesio pajamos vs. išlaidos (visa laiko juosta)
+    st.markdown("---")
+    st.subheader("Mėnesio srautas: Pajamos vs. Išlaidos")
+    tmp = df.copy()
+    tmp["Data_dt"] = pd.to_datetime(tmp["Data"], errors="coerce")
+    tmp = tmp.dropna(subset=["Data_dt"])
+    if tmp.empty:
+        st.caption("Pasirinktame filtre nėra duomenų.")
+        return
+    tmp["Mėnuo"] = tmp["Data_dt"].dt.to_period("M").astype(str)
+    pivot = tmp.pivot_table(
+        index="Mėnuo", columns="Tipas", values="Suma (€)", aggfunc="sum", fill_value=0.0
+    ).sort_index()
+    st.line_chart(pivot)
 
 def render_export():
     st.markdown("### Eksportas")
-    df = st.session_state.budget_df
+    df = _ensure_columns(st.session_state.budget_df)
     if df.empty:
         st.caption("Nėra ką eksportuoti.")
         return
@@ -275,7 +538,7 @@ def render_export():
         use_container_width=True,
     )
 
-    # Excel (reikia openpyxl paketo)
+    # Excel (reikia openpyxl)
     try:
         with BytesIO() as output:
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -301,16 +564,31 @@ def main():
         return
 
     _init_budget_state()
-    render_topbar()
 
+    # Mėnesio pasirinkimas + top juosta
+    months = available_months(st.session_state.budget_df)
+    # pasiūlysim naujausią mėnesį kaip default
+    default_month = months[-1] if months else pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+    if "selected_month" not in st.session_state:
+        st.session_state.selected_month = default_month
+
+    render_topbar(month_selected=st.session_state.selected_month)
+
+    # Likučio nustatymai ir mėnesio suvestinė
     with st.container():
-        form_col, table_col = st.columns([1.05, 1.95])
-        with form_col:
+        cA, cB = st.columns([1.05, 1.95])
+        with cA:
+            render_balance_settings()
+            st.markdown("---")
             render_budget_form()
             st.markdown("---")
             render_export()
-        with table_col:
+        with cB:
+            render_month_header_and_metrics()
+            st.markdown("---")
             render_budget_table_and_summary()
+            st.markdown("---")
+            render_charts()
 
 if __name__ == "__main__":
     main()
