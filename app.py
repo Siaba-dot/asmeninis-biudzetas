@@ -1,241 +1,232 @@
-# app.py
+# -*- coding: utf-8 -*-
+# Asmeninis biudžetas — vieno failo Streamlit aplikacija be išorinių importų (auth integruotas)
+# Sukurta taip, kad veiktų Streamlit Cloud be papildomų kelių ar paketų.
+
+import os
+import sys
+from datetime import datetime
 import streamlit as st
-from datetime import date, timedelta
-from supabase import Client
-from supabase_client import get_supabase, current_user
-import auth  # vietinis modulis
 import pandas as pd
 
-# =========================================================
-# Puslapio nustatymai + AUTH siena (turi būti po importų)
-# =========================================================
-st.set_page_config(page_title="Asmeninis biudžetas", layout="wide")
+# ------------------------------------------------------------
+# Puslapio konfigūracija (kompaktiškas išdėstymas, nėra nereikalingų tarpų)
+# ------------------------------------------------------------
+st.set_page_config(
+    page_title="Asmeninis biudžetas",
+    page_icon="💶",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-supabase: Client = get_supabase()
-
-# Auth siena (rodys login UI, jei neprisijungta)
-is_authed = auth.render_auth_ui(supabase)
-if not is_authed:
-    st.stop()
-
-# Patikimai gauname user'į. Jei nėra — pilnas logout ir sustabdymas.
-user = current_user(supabase)
-if not user:
-    auth.sign_out(supabase)
-    st.rerun()
-    st.stop()
-
-# =====================
-# Header + atsijungimas
-# =====================
-left, right = st.columns([1, 1])
-with left:
-    st.title("Asmeninis biudžetas")
-    st.caption(f"Prisijungta kaip: **{user.email}**")
-with right:
-    st.write("")
-    st.write("")
-    if st.button("Atsijungti", use_container_width=True):
-        auth.sign_out(supabase)
-        st.rerun()
-        st.stop()
-
-st.divider()
-
-# ==========================
-# Naudingos lokalinės funkc.
-# ==========================
-def format_eur_lt(value: float) -> str:
+# Minimalus CSS, kad "viršus" būtų glaustesnis
+st.markdown(
     """
-    LT/ES draugiškas valiutos formatas:
-    - tūkstančių skyriklis: tarpas
-    - dešimtainis kablelis: kablelis
-    Pvz.: 1 234,50 €
-    """
-    try:
-        s = f"{float(value):,.2f}"
-    except Exception:
-        s = "0.00"
-    s = s.replace(",", " ").replace(".", ",")
-    return f"{s} €"
+    <style>
+      .stAppDeployButton, header {visibility: hidden;}
+      .block-container {padding-top: 1rem; padding-bottom: 1rem; max-width: 1400px;}
+      .st-emotion-cache-ue6h4q {padding-top: 0rem;} /* kartais reikalinga Cloud'e */
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+# ------------------------------------------------------------
+# Autentifikacija (integruota vietoje importo from auth)
+# ------------------------------------------------------------
+def _init_auth_state():
+    if "auth" not in st.session_state:
+        st.session_state.auth = {
+            "is_authenticated": False,
+            "user_email": None,
+            "ts": None,
+        }
 
-def insert_transaction(
-    supabase: Client,
-    user_id: str,
-    ttype: str,
-    amount: float,
-    category: str,
-    note: str,
-    txn_date_val: date,
-):
-    payload = {
-        "user_id": user_id,
-        "type": ttype,
-        "amount": round(float(amount), 2),  # DB stulpelis numeric(12,2)
-        "category": (category or "").strip() or "Uncategorized",
-        "note": (note or "").strip() or None,
-        "txn_date": str(txn_date_val),
+def render_auth_ui():
+    """Paprastas prisijungimas. Vėliau galėsi pakeisti į savo logiką (DB, API, OAuth)."""
+    st.markdown("### Prisijungimas")
+    with st.form("login_form", clear_on_submit=False):
+        email = st.text_input("El. paštas", placeholder="pvz., vardas@pastas.lt")
+        password = st.text_input("Slaptažodis", type="password", placeholder="••••••••")
+        submitted = st.form_submit_button("Prisijungti", use_container_width=True)
+
+    # DEMO tikslams – paprastas tikrinimas (pakeisk į savo)
+    VALID_EMAILS = {
+        # Pakeisk savo kredencialais ar prisijungimų sąrašu. Jei nenori slaptažodžio – komentuok eilutes žemiau.
+        "sigita@example.com": "123456",
+        "demo@demo.lt": "demo",
     }
-    res = supabase.table("transactions").insert(payload).execute()
-    return res
 
+    if submitted:
+        if email.strip() == "" or password.strip() == "":
+            st.error("Įvesk el. paštą ir slaptažodį.")
+            return
 
-def fetch_transactions(
-    supabase: Client,
-    user_id: str,
-    date_from: date | None = None,
-    date_to: date | None = None,
-    ttype: str | None = None,
-    category: str | None = None,
-):
-    q = supabase.table("transactions").select("*").eq("user_id", user_id)
-
-    if date_from:
-        q = q.gte("txn_date", str(date_from))
-    if date_to:
-        q = q.lte("txn_date", str(date_to))
-    if ttype and ttype in ("income", "expense"):
-        q = q.eq("type", ttype)
-    if category and category.strip():
-        q = q.ilike("category", category.strip())
-
-    q = q.order("txn_date", desc=True).order("created_at", desc=True)
-    res = q.execute()
-    return res.data or []
-
-
-def delete_transaction(supabase: Client, row_id: str):
-    return supabase.table("transactions").delete().eq("id", row_id).execute()
-
-
-def render_rows_with_delete(rows: list[dict], supabase: Client):
-    """
-    Rodo sąrašą su eilutiniais Delete mygtukais.
-    Grąžina True, jei kas nors buvo ištrinta (persiųsim refresh).
-    """
-    deleted_any = False
-    for r in rows:
-        with st.container(border=True):
-            c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1, 1, 3, 0.5])
-            c1.write(str(r.get("txn_date", "")))
-            c2.write("🟢 Pajamos" if r.get("type") == "income" else "🔴 Išlaidos")
-            c3.write(format_eur_lt(r.get("amount", 0.0)))
-            c4.write(r.get("category", ""))
-            c5.write(r.get("note") or "")
-
-            btn_key = f"del_{r.get('id')}"
-            if c6.button("🗑️", key=btn_key, help="Trinti šį įrašą"):
-                try:
-                    delete_transaction(supabase, r["id"])
-                    st.success("Įrašas ištrintas")
-                    deleted_any = True
-                except Exception as e:
-                    st.error(f"Nepavyko ištrinti: {e}")
-    return deleted_any
-
-
-# ======================
-# ➕ Pridėti įrašą (FORM)
-# ======================
-st.subheader("➕ Pridėti įrašą")
-
-with st.form("add_txn", clear_on_submit=True):
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-    with c1:
-        ttype = st.selectbox("Tipas", ["expense", "income"], index=0)
-    with c2:
-        amount = st.number_input("Suma", min_value=0.00, step=0.10, format="%.2f")
-    with c3:
-        txn_date_val = st.date_input("Data", value=date.today(), format="YYYY/MM/DD")
-    with c4:
-        category = st.text_input("Kategorija", placeholder="Pvz.: Maistas, Transportas, Atlyginimas")
-    note = st.text_input("Pastaba", placeholder="(nebūtina)")
-
-    submitted = st.form_submit_button("Išsaugoti", use_container_width=True)
-
-if submitted:
-    if amount <= 0:
-        st.error("Suma turi būti > 0.")
-    else:
-        try:
-            insert_transaction(supabase, user.id, ttype, amount, category, note, txn_date_val)
-            st.success("Įrašas pridėtas ✅")
-            st.session_state["refresh_key"] = st.session_state.get("refresh_key", 0) + 1
+        if email in VALID_EMAILS and password == VALID_EMAILS[email]:
+            st.session_state.auth = {
+                "is_authenticated": True,
+                "user_email": email,
+                "ts": datetime.utcnow().isoformat(),
+            }
+            st.success("Sėkmingai prisijungta ✅")
             st.rerun()
-        except Exception as e:
-            st.error(f"Nepavyko įrašyti: {e}")
+        else:
+            st.error("Neteisingi prisijungimo duomenys.")
 
-st.divider()
+def sign_out():
+    st.session_state.auth = {
+        "is_authenticated": False,
+        "user_email": None,
+        "ts": None,
+    }
+    st.experimental_rerun()
 
-# ==========================
-# 📋 Filtrai + sąrašas (READ)
-# ==========================
-st.subheader("📋 Įrašų sąrašas")
+# ------------------------------------------------------------
+# Asmeninio biudžeto logika (paprastas pavyzdys)
+# ------------------------------------------------------------
+def _init_budget_state():
+    if "budget_df" not in st.session_state:
+        # Minimalus pavyzdinis DataFrame
+        st.session_state.budget_df = pd.DataFrame(
+            columns=["Data", "Tipas", "Kategorija", "Aprašymas", "Suma (€)"]
+        )
 
-# Numatyti filtrai: paskutinės 30 dienų
-default_from = date.today() - timedelta(days=30)
-default_to = date.today()
-
-fc1, fc2, fc3, fc4, fc5 = st.columns([1, 1, 1, 1, 1])
-with fc1:
-    f_from = st.date_input("Nuo", value=default_from, key="f_from", format="YYYY/MM/DD")
-with fc2:
-    f_to = st.date_input("Iki", value=default_to, key="f_to", format="YYYY/MM/DD")
-with fc3:
-    f_type = st.selectbox("Tipas", options=["visi", "income", "expense"], index=0, key="f_type")
-with fc4:
-    f_category = st.text_input("Kategorija (ieškoti)", placeholder="pvz.: %maistas%", key="f_category")
-with fc5:
-    reload_btn = st.button("Atnaujinti", use_container_width=True)
-
-# Valdomas persikrovimas po įterpimo ar „Atnaujinti“
-st.session_state["refresh_key"] = st.session_state.get("refresh_key", 0)
-if reload_btn:
-    st.session_state["refresh_key"] += 1
-
-_ = st.session_state["refresh_key"]  # priklausomybė Streamlit
-
-ttype_filter = None if f_type == "visi" else f_type
-category_filter = f_category if f_category else None
-
-try:
-    rows = fetch_transactions(
-        supabase,
-        user_id=user.id,
-        date_from=f_from,
-        date_to=f_to,
-        ttype=ttype_filter,
-        category=category_filter,
+def add_transaction_row(date, ttype, category, note, amount):
+    row = {
+        "Data": date.strftime("%Y-%m-%d") if isinstance(date, datetime) else str(date),
+        "Tipas": ttype,  # "Pajamos" arba "Išlaidos"
+        "Kategorija": category,
+        "Aprašymas": note,
+        "Suma (€)": round(float(amount), 2),
+    }
+    st.session_state.budget_df = pd.concat(
+        [st.session_state.budget_df, pd.DataFrame([row])], ignore_index=True
     )
-except Exception as e:
-    rows = []
-    st.error(f"Nepavyko nuskaityti įrašų: {e}")
 
-# ==========================
-# Atvaizdavimas + suvestinės
-# ==========================
-if rows:
-    # Suvestinės
-    try:
-        df = pd.DataFrame(rows)
-        total_income = float(df.loc[df["type"] == "income", "amount"].sum()) if "type" in df and "amount" in df else 0.0
-        total_expense = float(df.loc[df["type"] == "expense", "amount"].sum()) if "type" in df and "amount" in df else 0.0
-    except Exception:
-        total_income = sum(float(r.get("amount", 0.0)) for r in rows if r.get("type") == "income")
-        total_expense = sum(float(r.get("amount", 0.0)) for r in rows if r.get("type") == "expense")
+def compute_summary(df: pd.DataFrame):
+    if df.empty:
+        return 0.0, 0.0, 0.0
+    pajamos = df.loc[df["Tipas"] == "Pajamos", "Suma (€)"].sum()
+    islaidos = df.loc[df["Tipas"] == "Išlaidos", "Suma (€)"].sum()
+    balansas = round(pajamos - islaidos, 2)
+    return round(pajamos, 2), round(islaidos, 2), balansas
 
-    balance = total_income - total_expense
+# ------------------------------------------------------------
+# UI blokai
+# ------------------------------------------------------------
+def render_topbar():
+    left, mid, right = st.columns([1.2, 2, 1])
+    with left:
+        st.markdown("## 💶 Asmeninis biudžetas")
+    with mid:
+        st.write("")
+    with right:
+        user = st.session_state.auth.get("user_email")
+        st.caption(f"Prisijungta: **{user}**")
+        st.button("Atsijungti", on_click=sign_out, use_container_width=True)
 
+def render_budget_form():
+    st.markdown("### Įrašas")
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1.2, 2, 1])
+    default_date = datetime.today()
+    with c1:
+        date = st.date_input("Data", value=default_date)
+    with c2:
+        ttype = st.selectbox("Tipas", ["Pajamos", "Išlaidos"], index=1)
+    with c3:
+        category = st.text_input("Kategorija", placeholder="pvz., Maistas, Nuoma, Alga")
+    with c4:
+        note = st.text_input("Aprašymas", placeholder="Trumpas paaiškinimas")
+    with c5:
+        amount = st.number_input("Suma (€)", min_value=0.00, value=0.00, step=0.10, format="%.2f")
+
+    c6, _ = st.columns([1, 3])
+    with c6:
+        if st.button("➕ Pridėti", use_container_width=True):
+            if amount <= 0:
+                st.warning("Suma turi būti didesnė už 0.")
+            elif category.strip() == "":
+                st.warning("Įvesk kategoriją.")
+            else:
+                add_transaction_row(date, ttype, category.strip(), note.strip(), amount)
+                st.success("Įrašas pridėtas.")
+                st.rerun()
+
+def render_budget_table_and_summary():
+    st.markdown("### Įrašai")
+    df = st.session_state.budget_df
+    if df.empty:
+        st.info("Dar nėra įrašų. Pridėk pirmą įrašą viršuje.")
+    else:
+        st.dataframe(
+            df.sort_values(by="Data", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    pajamos, islaidos, balansas = compute_summary(df)
+    st.markdown("---")
     s1, s2, s3 = st.columns(3)
-    s1.metric("Pajamos", format_eur_lt(total_income))
-    s2.metric("Išlaidos", format_eur_lt(total_expense))
-    s3.metric("Balansas", format_eur_lt(balance))
+    with s1:
+        st.metric("Pajamos", f"{pajamos:,.2f} €")
+    with s2:
+        st.metric("Išlaidos", f"{islaidos:,.2f} €")
+    with s3:
+        delta = pajamos - islaidos
+        st.metric("Balansas", f"{balansas:,.2f} €", delta=f"{delta:,.2f} €")
 
-    st.caption("Naujausi įrašai")
-    got_deleted = render_rows_with_delete(rows, supabase)
-    if got_deleted:
-        st.session_state["refresh_key"] += 1
-        st.rerun()
-else:
-    st.info("Įrašų nerasta pagal pasirinktus filtrus.")
+def render_export():
+    st.markdown("### Eksportas")
+    df = st.session_state.budget_df
+    if df.empty:
+        st.caption("Nėra ką eksportuoti.")
+        return
+
+    # CSV
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Atsisiųsti CSV",
+        data=csv_bytes,
+        file_name=f"biudzetas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+    # Excel
+    from io import BytesIO
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Biudžetas", index=False)
+    st.download_button(
+        "⬇️ Atsisiųsti Excel",
+        data=output.getvalue(),
+        file_name=f"biudzetas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+# ------------------------------------------------------------
+# App paleidimas
+# ------------------------------------------------------------
+def main():
+    _init_auth_state()
+
+    if not st.session_state.auth["is_authenticated"]:
+        # Prisijungimo ekranas
+        render_auth_ui()
+        return
+
+    # Autentifikuotas ekranas
+    _init_budget_state()
+    render_topbar()
+
+    with st.container():
+        form_col, table_col = st.columns([1.1, 1.9])
+        with form_col:
+            render_budget_form()
+            render_export()
+        with table_col:
+            render_budget_table_and_summary()
+
+if __name__ == "__main__":
+    main()
+
