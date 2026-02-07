@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import io
 from datetime import date
 from supabase import create_client
 from supabase.client import Client
-import io
 
 # =========================
 # Supabase klientas
@@ -40,11 +40,13 @@ if "authenticated" not in st.session_state:
     st.title("🔐 Prisijungimas")
     email = st.text_input("El. paštas")
     password = st.text_input("Slaptažodis", type="password")
-    if st.button("Prisijungti"):
+    
+    login_clicked = st.button("Prisijungti")
+    if login_clicked:
         if email and password and login(email, password):
             st.session_state["authenticated"] = True
             st.session_state["email"] = email
-            st.experimental_rerun()
+            st.experimental_rerun()  # <- saugu, nes button paspaustas
         else:
             st.error("❌ Neteisingi duomenys")
     st.stop()
@@ -69,7 +71,7 @@ def money(v: float) -> str:
     return f"{v:,.2f} {CURRENCY}".replace(",", " ")
 
 # =========================
-# Naujo įrašo formos funkcija
+# Naujo įrašo funkcija
 # =========================
 def insert_row(d: date, typ: str, cat: str, merch: str, desc: str, amount: float):
     payload = {
@@ -80,11 +82,15 @@ def insert_row(d: date, typ: str, cat: str, merch: str, desc: str, amount: float
         "aprasymas": desc or "",
         "suma_eur": float(amount)
     }
-    res = supabase.table(TABLE).insert(payload).execute()
-    if getattr(res, "error", None):
-        st.error(f"Įrašyti nepavyko: {res.error}")
+    try:
+        res = supabase.table(TABLE).insert(payload).execute()
+        if getattr(res, "error", None):
+            st.error(f"Įrašyti nepavyko: {res.error}")
+            return False
+        return True
+    except Exception as e:
+        st.error(f"Įrašyti nepavyko: {e}")
         return False
-    return True
 
 def entry_form():
     st.subheader("📝 Naujas įrašas")
@@ -107,9 +113,6 @@ def entry_form():
         ok = insert_row(dval, tval, cat, merch, desc, aval)
         if ok:
             st.success("Įrašyta!")
-            # Nuvalo cache, kad iš karto parodytų naujus duomenis
-            fetch_months.clear()
-            fetch_month_df.clear()
         else:
             st.warning("Įrašas neįrašytas.")
 
@@ -142,7 +145,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.read()
 
 # =========================
-# Main
+# Pagrindinis puslapis
 # =========================
 st.title("💶 Asmeninis biudžetas")
 
@@ -161,13 +164,14 @@ if not df_month.empty:
     s_inc = df_month.loc[df_month["tipas"]=="Pajamos","suma_eur"].sum()
     s_exp = df_month.loc[df_month["tipas"]=="Išlaidos","suma_eur"].sum()
     s_bal = s_inc - s_exp
+
     st.subheader("📊 Suvestinė")
     c1, c2, c3 = st.columns(3)
     c1.metric("Pajamos", money(s_inc))
     c2.metric("Išlaidos", money(s_exp))
     c3.metric("Balansas", money(s_bal))
 
-    # Parsisiuntimo Excel
+    # Excel parsisiuntimas
     xlsb = to_excel_bytes(df_month)
     st.download_button(
         "⬇️ Parsisiųsti Excel",
@@ -176,8 +180,7 @@ if not df_month.empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # Diagrama Pajamos vs Išlaidos
-    if not df_month.empty:
-        agg = df_month.groupby("tipas")["suma_eur"].sum().reset_index()
-        fig2 = px.bar(agg, x="tipas", y="suma_eur", title="Pajamos vs Išlaidos", text="suma_eur")
-        st.plotly_chart(fig2, use_container_width=True)
+    # Diagramų atvaizdavimas
+    fig = px.pie(df_month[df_month["tipas"]=="Išlaidos"], names="kategorija", values="suma_eur",
+                 title="Išlaidos pagal kategorijas", hole=0.5)
+    st.plotly_chart(fig, use_container_width=True)
