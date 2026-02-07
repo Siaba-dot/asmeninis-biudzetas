@@ -19,8 +19,7 @@ st.write("DEBUG sys.path head:", sys.path[:3])
 # Asmeninis biudžetas — vieno failo Streamlit aplikacija be išorinių importų (auth integruotas)
 # Sukurta taip, kad veiktų Streamlit Cloud be papildomų kelių ar paketų.
 
-import os
-import sys
+
 from datetime import datetime
 import streamlit as st
 import pandas as pd
