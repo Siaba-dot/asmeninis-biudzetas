@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
 from datetime import date
 from supabase import create_client
 from supabase.client import Client
@@ -24,7 +22,7 @@ def get_supabase() -> Client:
 supabase = get_supabase()
 
 # =========================
-# Login
+# Login funkcijos
 # =========================
 def login(email: str, password: str) -> bool:
     try:
@@ -38,6 +36,9 @@ def logout():
     st.session_state.clear()
     st.experimental_rerun()
 
+# =========================
+# Session inicijavimas
+# =========================
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -46,11 +47,12 @@ if not st.session_state["authenticated"]:
     email = st.text_input("El. paštas")
     password = st.text_input("Slaptažodis", type="password")
     
-    if st.button("Prisijungti"):
+    login_button = st.button("Prisijungti")
+    if login_button:
         if email and password and login(email, password):
             st.session_state["authenticated"] = True
             st.session_state["email"] = email
-            st.experimental_rerun()
+            st.experimental_rerun()  # kviečiame tik po mygtuko paspaudimo
         else:
             st.error("❌ Neteisingi duomenys")
     st.stop()
@@ -113,6 +115,9 @@ def entry_form():
         ok = insert_row(dval, tval, cat, merch, desc, aval)
         if ok:
             st.success("Įrašyta!")
+            # Išvalom cache, kad naujas įrašas atsirastų ekrane
+            fetch_months.clear()
+            fetch_month_df.clear()
         else:
             st.warning("Įrašas neįrašytas.")
 
@@ -145,14 +150,13 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return bio.read()
 
 # =========================
-# Main
+# Pagrindinis puslapis
 # =========================
 st.title("💶 Asmeninis biudžetas")
 
-# Naujo įrašo forma
-entry_form()
+entry_form()  # įvedimo forma
 
-# Mėnesių pasirinkimas
+# Rodom duomenis
 months = fetch_months()
 if not months:
     st.info("Nėra duomenų")
@@ -161,8 +165,8 @@ if not months:
 selected_month = st.selectbox("Pasirink mėnesį", months, format_func=ym_label)
 df_month = fetch_month_df(selected_month)
 
-# Suvestinė
 if not df_month.empty:
+    # Suvestinė
     s_inc = df_month.loc[df_month["tipas"]=="Pajamos","suma_eur"].sum()
     s_exp = df_month.loc[df_month["tipas"]=="Išlaidos","suma_eur"].sum()
     s_bal = s_inc - s_exp
@@ -181,15 +185,12 @@ if not df_month.empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# Diagramos – Pajamos vs Išlaidos
-if not df_month.empty:
-    pivot = df_month.pivot_table(index="data", columns="tipas", values="suma_eur", aggfunc="sum").fillna(0)
-    pivot["Balansas"] = pivot.get("Pajamos",0) - pivot.get("Išlaidos",0)
-    
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=pivot.index, y=pivot.get("Pajamos",0), name="Pajamos"))
-    fig.add_trace(go.Bar(x=pivot.index, y=pivot.get("Išlaidos",0), name="Išlaidos"))
-    fig.add_trace(go.Scatter(x=pivot.index, y=pivot["Balansas"], mode="lines+markers", name="Balansas", line=dict(color="yellow")))
-    fig.update_layout(title="Pajamos vs Išlaidos per mėnesį", barmode="group", height=400)
-    
+    # Pie chart – Išlaidos pagal kategorijas
+    fig = px.pie(df_month[df_month["tipas"]=="Išlaidos"], names="kategorija", values="suma_eur",
+                 title="Išlaidos pagal kategorijas", hole=0.5)
     st.plotly_chart(fig, use_container_width=True)
+
+    # Pajamos vs Išlaidos bar
+    bar_df = df_month.groupby("tipas", as_index=False)["suma_eur"].sum()
+    fig2 = px.bar(bar_df, x="tipas", y="suma_eur", text="suma_eur", title="Pajamos vs Išlaidos")
+    st.plotly_chart(fig2, use_container_width=True)
