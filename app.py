@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
 from datetime import date
 from supabase import create_client
 from supabase.client import Client
@@ -22,7 +24,7 @@ def get_supabase() -> Client:
 supabase = get_supabase()
 
 # =========================
-# Login mechanizmas
+# Login
 # =========================
 def login(email: str, password: str) -> bool:
     try:
@@ -51,7 +53,7 @@ if not st.session_state["authenticated"]:
             st.experimental_rerun()
         else:
             st.error("❌ Neteisingi duomenys")
-    st.stop()  # Blokuoja app tol, kol nesate prisijungę
+    st.stop()
 
 st.success(f"Prisijungta kaip **{st.session_state['email']}**")
 if st.button("🚪 Atsijungti"):
@@ -147,10 +149,10 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # =========================
 st.title("💶 Asmeninis biudžetas")
 
-# Įvedimo forma
+# Naujo įrašo forma
 entry_form()
 
-# Pasirink mėnesį
+# Mėnesių pasirinkimas
 months = fetch_months()
 if not months:
     st.info("Nėra duomenų")
@@ -159,19 +161,18 @@ if not months:
 selected_month = st.selectbox("Pasirink mėnesį", months, format_func=ym_label)
 df_month = fetch_month_df(selected_month)
 
-# Suvestinė ir Excel eksportas
+# Suvestinė
 if not df_month.empty:
     s_inc = df_month.loc[df_month["tipas"]=="Pajamos","suma_eur"].sum()
     s_exp = df_month.loc[df_month["tipas"]=="Išlaidos","suma_eur"].sum()
     s_bal = s_inc - s_exp
-
     st.subheader("📊 Suvestinė")
     c1, c2, c3 = st.columns(3)
     c1.metric("Pajamos", money(s_inc))
     c2.metric("Išlaidos", money(s_exp))
     c3.metric("Balansas", money(s_bal))
 
-    # Excel parsisiuntimas
+    # Parsisiuntimo Excel
     xlsb = to_excel_bytes(df_month)
     st.download_button(
         "⬇️ Parsisiųsti Excel",
@@ -180,7 +181,15 @@ if not df_month.empty:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # Grafikai
-    fig = px.pie(df_month[df_month["tipas"]=="Išlaidos"], names="kategorija", values="suma_eur",
-                 title="Išlaidos pagal kategorijas", hole=0.5)
+# Diagramos – Pajamos vs Išlaidos
+if not df_month.empty:
+    pivot = df_month.pivot_table(index="data", columns="tipas", values="suma_eur", aggfunc="sum").fillna(0)
+    pivot["Balansas"] = pivot.get("Pajamos",0) - pivot.get("Išlaidos",0)
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=pivot.index, y=pivot.get("Pajamos",0), name="Pajamos"))
+    fig.add_trace(go.Bar(x=pivot.index, y=pivot.get("Išlaidos",0), name="Išlaidos"))
+    fig.add_trace(go.Scatter(x=pivot.index, y=pivot["Balansas"], mode="lines+markers", name="Balansas", line=dict(color="yellow")))
+    fig.update_layout(title="Pajamos vs Išlaidos per mėnesį", barmode="group", height=400)
+    
     st.plotly_chart(fig, use_container_width=True)
