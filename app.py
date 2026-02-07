@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 # Asmeninis biudžetas — vieno failo Streamlit aplikacija
-# Autentifikacija tik per st.secrets (Secrets manager), be jokio jautraus kodo repo.
+# Autentifikacija tik per st.secrets (be jokių jautrių duomenų kode).
+# Palaikomi slaptažodžiai: plaintext (password) ARBA bcrypt hash (password_hash).
 
-import os
-import sys
 from datetime import datetime, date
 from io import BytesIO
 
@@ -11,7 +10,7 @@ import streamlit as st
 import pandas as pd
 
 # ------------------------------------------------------------
-# PIRMA Streamlit komanda — puslapio konfigūracija
+# 1) PIRMA Streamlit komanda — puslapio konfigūracija
 # ------------------------------------------------------------
 st.set_page_config(
     page_title="Asmeninis biudžetas",
@@ -21,7 +20,7 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------
-# Minimalus CSS — kompaktiškas išdėstymas
+# 2) Minimalus stilius — kompaktiškas išdėstymas (neprivaloma)
 # ------------------------------------------------------------
 st.markdown(
     """
@@ -41,31 +40,39 @@ st.markdown(
 )
 
 # ------------------------------------------------------------
-# Autentifikacija iš st.secrets
-# Palaiko: plaintext password ARBA bcrypt password_hash (st.secrets)
+# 3) Autentifikacija per st.secrets
+#    Secrets pavyzdžiai (Cloud -> Manage app -> Settings -> Secrets):
+#    [auth]
+#    users = [
+#      { email = "sigita.abasoviene@gmail.com", password = "Sau*leta-2025" }
+#    ]
+#
+#    ARBA su bcrypt hash (reikia į requirements.txt įtraukti bcrypt>=4.0):
+#    [auth]
+#    users = [
+#      { email = "sigita@pastas.lt", password_hash = "$2b$12$...." }
+#    ]
 # ------------------------------------------------------------
 def _read_users_from_secrets():
-    """Grąžina vartotojų sąrašą iš st.secrets. Jei nieko nėra, grąžina []."""
+    """Grąžina vartotojų sąrašą iš st.secrets. Jei neranda, grąžina []."""
     try:
         users = st.secrets["auth"]["users"]
         if not isinstance(users, (list, tuple)):
             return []
-        # normalizuojam raktus
         norm = []
         for u in users:
-            if not isinstance(u, dict):
-                continue
-            norm.append({
-                "email": str(u.get("email", "")).strip(),
-                "password": u.get("password"),           # plaintext pasirinktinai
-                "password_hash": u.get("password_hash"), # bcrypt hash pasirinktinai
-            })
+            if isinstance(u, dict):
+                norm.append({
+                    "email": str(u.get("email", "")).strip(),
+                    "password": u.get("password"),           # plaintext (nebūtina)
+                    "password_hash": u.get("password_hash"), # bcrypt (nebūtina)
+                })
         return norm
     except Exception:
         return []
 
 def _bcrypt_check(password, password_hash):
-    """Patikrina bcrypt hash. Jei bcrypt nėra instaliuotas – grąžina False."""
+    """Tikrina bcrypt hash; jei bcrypt neįdiegtas, grąžina False."""
     try:
         import bcrypt
     except Exception:
@@ -80,23 +87,25 @@ def _bcrypt_check(password, password_hash):
         return False
 
 def _is_valid_credentials(email: str, password: str) -> bool:
-    """Leidžia prisijungti, jei atitinka plaintext arba bcrypt hash iš secrets."""
-    email = (email or "").strip()
+    """Leidžia prisijungti, jei el. paštas + slaptažodis atitinka secrets (case-insensitive email)."""
+    email = (email or "").strip().lower()
     password = (password or "")
     if not email or not password:
         return False
 
-    users = _read_users_from_secrets()
-    for u in users:
-        if u.get("email") == email:
-            # 1) bcrypt
-            ph = u.get("password_hash")
-            if ph and _bcrypt_check(password, ph):
-                return True
-            # 2) plaintext (jei pasirinkta)
-            pw = u.get("password")
-            if isinstance(pw, str) and pw == password:
-                return True
+    for u in _read_users_from_secrets():
+        u_email = (u.get("email") or "").strip().lower()
+
+        # 1) bcrypt
+        ph = u.get("password_hash")
+        if u_email == email and ph and _bcrypt_check(password, ph):
+            return True
+
+        # 2) plaintext
+        pw = u.get("password")
+        if u_email == email and isinstance(pw, str) and pw == password:
+            return True
+
     return False
 
 def _init_auth_state():
@@ -108,10 +117,9 @@ def render_auth_ui():
     if not users:
         st.error(
             "Nerasti prisijungimo duomenys `st.secrets`. "
-            "Eik į *Manage app → Settings → Secrets* ir pridėk [auth].users sąrašą. "
-            "Žr. README instrukciją arba kreipkis dėl pavyzdžio."
+            "Eik į *Manage app → Settings → Secrets* ir pridėk [auth].users sąrašą."
         )
-        with st.expander("Greitas pavyzdys (plaintext)", expanded=False):
+        with st.expander("Pavyzdys (plaintext)", expanded=False):
             st.code(
                 '''[auth]
 users = [
@@ -119,7 +127,7 @@ users = [
 ]''',
                 language="toml",
             )
-        with st.expander("Greitas pavyzdys (bcrypt)", expanded=False):
+        with st.expander("Pavyzdys (bcrypt)", expanded=False):
             st.code(
                 '''[auth]
 users = [
@@ -139,7 +147,7 @@ users = [
         if _is_valid_credentials(email, password):
             st.session_state.auth = {
                 "is_authenticated": True,
-                "user_email": email.strip(),
+                "user_email": (email or "").strip(),
                 "ts": datetime.utcnow().isoformat(),
             }
             st.success("Sėkmingai prisijungta ✅")
@@ -148,11 +156,12 @@ users = [
             st.error("Neteisingi prisijungimo duomenys.")
 
 def sign_out():
+    # Stabilus atsijungimas: be experimental_rerun ir be on_click callback.
     st.session_state.auth = {"is_authenticated": False, "user_email": None, "ts": None}
-    st.experimental_rerun()
+    st.rerun()
 
 # ------------------------------------------------------------
-# Biudžeto logika
+# 4) Biudžeto logika
 # ------------------------------------------------------------
 def _init_budget_state():
     if "budget_df" not in st.session_state:
@@ -182,7 +191,7 @@ def compute_summary(df: pd.DataFrame):
     return round(pajamos, 2), round(islaidos, 2), balansas
 
 # ------------------------------------------------------------
-# UI
+# 5) UI komponentai
 # ------------------------------------------------------------
 def render_topbar():
     left, mid, right = st.columns([1.2, 2, 1])
@@ -193,7 +202,9 @@ def render_topbar():
     with right:
         user = st.session_state.auth.get("user_email")
         st.caption(f"Prisijungta: **{user}**" if user else "")
-        st.button("Atsijungti", on_click=sign_out, use_container_width=True)
+        # Svarbu: be on_click callback — taip išvengiam session_state callback klaidų
+        if st.button("Atsijungti", use_container_width=True, key="btn_signout"):
+            sign_out()
 
 def render_budget_form():
     st.markdown("### Naujas įrašas")
@@ -264,7 +275,7 @@ def render_export():
         use_container_width=True,
     )
 
-    # Excel
+    # Excel (reikia openpyxl paketo)
     try:
         with BytesIO() as output:
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -280,7 +291,7 @@ def render_export():
         st.caption("Excel eksportui reikia `openpyxl`. Įtrauk į requirements.txt, jei mygtukas neveikia.")
 
 # ------------------------------------------------------------
-# App
+# 6) App paleidimas
 # ------------------------------------------------------------
 def main():
     _init_auth_state()
