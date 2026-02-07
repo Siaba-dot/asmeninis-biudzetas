@@ -1,4 +1,4 @@
-import os
+    import os
 import io
 import streamlit as st
 import pandas as pd
@@ -21,9 +21,9 @@ COL_DESC         = "aprasymas"          # TEXT (NOT NULL DEFAULT '')
 COL_AMOUNT       = "suma_eur"           # NUMERIC(12,2)
 
 CURRENCY         = "€"
-DEFAULT_MONTHS_TREND = 12               # kiek mėnesių rodyti trendo grafike
-SHOW_ENTRY_FORM  = True                 # rodyti įvedimo formą
-SHOW_EXPORT_XLSX = True                 # leisti mėnesio lentelei eksportą į Excel
+DEFAULT_MONTHS_TREND = 12
+SHOW_ENTRY_FORM  = True
+SHOW_EXPORT_XLSX = True
 
 # =========================
 # PUSLAPIO NUSTATYMAI + STILIUS
@@ -35,7 +35,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Tamsus neon UI
 st.markdown(
     """
     <style>
@@ -56,7 +55,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Plotly dark-neon tema
+# Plotly dark neon tema
 pio.templates["neon_dark"] = go.layout.Template(
     layout=dict(
         paper_bgcolor="#0f1226",
@@ -71,34 +70,29 @@ pio.templates["neon_dark"] = go.layout.Template(
 pio.templates.default = "neon_dark"
 
 # =========================
-# Supabase inicializacija (palaiko flat ir [supabase] sekciją)
+# Supabase inicializacija – SKAITO IŠ [supabase] SEKCJOS
 # =========================
 @st.cache_resource(show_spinner=False)
 def get_supabase() -> Client:
-    # 1) Plokšti raktai
-    url = st.secrets.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_ANON_KEY")
-    # 2) Sekcija [supabase]
-    if (not url or not key) and "supabase" in st.secrets and isinstance(st.secrets["supabase"], dict):
-        url = url or st.secrets["supabase"].get("url") or st.secrets["supabase"].get("SUPABASE_URL")
-        key = key or st.secrets["supabase"].get("anon_key") or st.secrets["supabase"].get("SUPABASE_ANON_KEY")
-    # 3) ENV fallback (lokaliam dev)
-    url = url or os.environ.get("SUPABASE_URL")
-    key = key or os.environ.get("SUPABASE_ANON_KEY")
+    if "supabase" not in st.secrets or not isinstance(st.secrets["supabase"], dict):
+        st.error(
+            "❌ Secrets nerasta sekcija [supabase].\n\n"
+            "Pridėkite į Secrets (TOML):\n"
+            "[supabase]\n"
+            'url = "https://tavopavadinimas.supabase.co"\n'
+            'anon_key = "ey..."\n'
+        )
+        st.stop()
+
+    url = st.secrets["supabase"].get("url")
+    key = st.secrets["supabase"].get("anon_key")
 
     if not url or not key:
         st.error(
-            "❌ Supabase konfigūracija nerasta.\n\n"
-            "Palaikomi formatai (pasirink vieną):\n"
-            "A) Secrets (plokščiai):\n"
-            '   SUPABASE_URL = "https://xxxxx.supabase.co"\n'
-            '   SUPABASE_ANON_KEY = "ey..."\n'
-            "B) Secrets (sekcija):\n"
-            "[supabase]\n"
-            'url = "https://xxxxx.supabase.co"\n'
-            'anon_key = "ey..."\n'
-            "\nCloud: Manage app → Settings → Secrets\n"
-            "Lokalus dev: .streamlit/secrets.toml"
+            "❌ Trūksta [supabase] reikšmių.\n"
+            "Reikalinga:\n"
+            '  url = "https://...supabase.co"\n'
+            '  anon_key = "ey..."\n'
         )
         st.stop()
 
@@ -245,7 +239,6 @@ def fetch_month_df(ym: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False, ttl=300)
 def fetch_trend_df(last_n_months: int = DEFAULT_MONTHS_TREND) -> pd.DataFrame:
-    # Paskutiniai N mėnesių nuo šiandien
     today = date.today()
     y, m = today.year, today.month
     start_y = y
@@ -279,7 +272,7 @@ def plot_monthly_trend(df: pd.DataFrame) -> Optional[go.Figure]:
     if df.empty:
         return None
     agg = df.groupby(["ym", COL_TYPE], as_index=False)[COL_AMOUNT].sum()
-    # užpildom trūkstamas kombinacijas, kad linijos nesutrūktų
+    # užpildom trūkstamas kombinacijas
     all_ym = sorted(agg["ym"].unique().tolist())
     for t in ["Pajamos","Išlaidos"]:
         if not ((agg[COL_TYPE] == t).any()):
