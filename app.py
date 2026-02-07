@@ -6,15 +6,45 @@ from supabase_client import get_supabase, current_user
 import auth  # vietinis modulis
 import pandas as pd
 
-# -------------------------
-# Puslapio nustatymai
-# -------------------------
+# =========================================================
+# Puslapio nustatymai + AUTH siena (turi būti po importų)
+# =========================================================
 st.set_page_config(page_title="Asmeninis biudžetas", layout="wide")
 
+supabase: Client = get_supabase()
 
-# -------------------------
-# Naudingos funkcijos
-# -------------------------
+# Auth siena (rodys login UI, jei neprisijungta)
+is_authed = auth.render_auth_ui(supabase)
+if not is_authed:
+    st.stop()
+
+# Patikimai gauname user'į. Jei nėra — pilnas logout ir sustabdymas.
+user = current_user(supabase)
+if not user:
+    auth.sign_out(supabase)
+    st.rerun()
+    st.stop()
+
+# =====================
+# Header + atsijungimas
+# =====================
+left, right = st.columns([1, 1])
+with left:
+    st.title("Asmeninis biudžetas")
+    st.caption(f"Prisijungta kaip: **{user.email}**")
+with right:
+    st.write("")
+    st.write("")
+    if st.button("Atsijungti", use_container_width=True):
+        auth.sign_out(supabase)
+        st.rerun()
+        st.stop()
+
+st.divider()
+
+# ==========================
+# Naudingos lokalinės funkc.
+# ==========================
 def format_eur_lt(value: float) -> str:
     """
     LT/ES draugiškas valiutos formatas:
@@ -105,46 +135,9 @@ def render_rows_with_delete(rows: list[dict], supabase: Client):
     return deleted_any
 
 
-# -------------------------
-# Supabase klientas
-# -------------------------
-supabase = get_supabase()
-
-# -------------------------
-# Auth „siena“
-# -------------------------
-is_authed = render_auth_ui(supabase)
-if not is_authed:
-    st.stop()
-
-# Patikimai gauname user'į. Jei nėra — pilnas logout ir sustabdymas.
-user = current_user(supabase)
-if not user:
-    # Saugo nuo „pusiau atsijungus“ būsenų
-    sign_out(supabase)
-    st.rerun()
-    st.stop()
-
-# -------------------------
-# Antraštė ir Atsijungimas
-# -------------------------
-left, right = st.columns([1, 1])
-with left:
-    st.title("Asmeninis biudžetas")
-    st.caption(f"Prisijungta kaip: **{user.email}**")
-with right:
-    st.write("")
-    st.write("")
-    if st.button("Atsijungti", use_container_width=True):
-        sign_out(supabase)
-        st.rerun()
-        st.stop()
-
-st.divider()
-
-# -------------------------
-# Įvedimo forma (CREATE)
-# -------------------------
+# ======================
+# ➕ Pridėti įrašą (FORM)
+# ======================
 st.subheader("➕ Pridėti įrašą")
 
 with st.form("add_txn", clear_on_submit=True):
@@ -175,9 +168,9 @@ if submitted:
 
 st.divider()
 
-# -------------------------
-# Filtrai + sąrašas (READ)
-# -------------------------
+# ==========================
+# 📋 Filtrai + sąrašas (READ)
+# ==========================
 st.subheader("📋 Įrašų sąrašas")
 
 # Numatyti filtrai: paskutinės 30 dienų
@@ -219,9 +212,9 @@ except Exception as e:
     rows = []
     st.error(f"Nepavyko nuskaityti įrašų: {e}")
 
-# -------------------------
+# ==========================
 # Atvaizdavimas + suvestinės
-# -------------------------
+# ==========================
 if rows:
     # Suvestinės
     try:
