@@ -167,6 +167,16 @@ def fetch_month_df(ym):
     return df
 
 # =========================
+# Excel eksportas
+# =========================
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Duomenys")
+    bio.seek(0)
+    return bio.read()
+
+# =========================
 # UI
 # =========================
 st.title("💶 Asmeninis biudžetas")
@@ -198,6 +208,14 @@ if not df_month.empty:
     c1.metric("Pajamos", money(inc))
     c2.metric("Išlaidos", money(exp))
     c3.metric("Balansas", money(inc - exp))
+
+    # Excel mygtukas
+    st.download_button(
+        label="⬇️ Parsisiųsti Excel",
+        data=to_excel_bytes(df_month),
+        file_name=f"biudzetas_{selected_month}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # =========================
 # Lentelė
