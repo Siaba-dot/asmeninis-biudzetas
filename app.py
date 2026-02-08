@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from datetime import date
 from supabase import create_client
 from supabase.client import Client
@@ -58,6 +59,12 @@ if st.button("🚪 Atsijungti"):
 # =========================
 TABLE = "biudzetas"
 CURRENCY = "€"
+LT_MONTHS = ["Sausis","Vasaris","Kovas","Balandis","Gegužė","Birželis",
+             "Liepa","Rugpjūtis","Rugsėjis","Spalis","Lapkritis","Gruodis"]
+
+def ym_label(ym: str) -> str:
+    y, m = ym.split("-")
+    return f"{y} m. {LT_MONTHS[int(m)-1]}"
 
 def money(v: float) -> str:
     return f"{v:,.2f} {CURRENCY}".replace(",", " ")
@@ -108,19 +115,19 @@ def entry_form():
 # =========================
 # Duomenų užklausos
 # =========================
-@st.cache_data(ttl=30)
-def fetch_user_data() -> pd.DataFrame:
-    data = supabase.table(TABLE)\
-        .select("*")\
-        .eq("user_email", st.session_state["email"])\
-        .order("data", desc=True)\
-        .execute().data or []
+@st.cache_data(ttl=300)
+def fetch_user_data():
+    data = supabase.table(TABLE).select("*").eq("user_email", st.session_state["email"]).order("data", desc=True).execute().data or []
     df = pd.DataFrame(data)
     if not df.empty:
-        df["data"] = pd.to_datetime(df["data"])
+        df["data"] = pd.to_datetime(df["data"]).dt.date
         df["suma_eur"] = pd.to_numeric(df["suma_eur"], errors="coerce").fillna(0.0)
-        df["kategorija"] = df["kategorija"].fillna("Nežinoma")
     return df
+
+@st.cache_data(ttl=300)
+def fetch_months(df):
+    months = sorted({f"{r.data.year:04d}-{r.data.month:02d}" for r in pd.to_datetime(df["data"])})
+    return months
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     bio = io.BytesIO()
@@ -134,24 +141,45 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # =========================
 st.title("💶 Asmeninis biudžetas")
 
+# Įrašų forma
 entry_form()
 
-df = fetch_user_data()
+# Visi vartotojo įrašai
+df_user = fetch_user_data()
 
-st.subheader("📋 Visi įrašai")
-st.dataframe(df)
+if df_user.empty:
+    st.info("Nėra duomenų")
+    st.stop()
+
+# Filtrai
+st.sidebar.subheader("Filtrai")
+months = fetch_months(df_user)
+selected_month = st.sidebar.selectbox("Mėnuo", ["Visi"] + months, format_func=lambda x: ym_label(x) if x!="Visi" else "Visi")
+tipas_filter = st.sidebar.selectbox("Tipas", ["Visi","Pajamos","Išlaidos"])
+cat_filter = st.sidebar.selectbox("Kategorija", ["Visi"] + sorted(df_user["kategorija"].unique()))
+
+df_filtered = df_user.copy()
+if selected_month != "Visi":
+    y,m = map(int, selected_month.split("-"))
+    df_filtered = df_filtered[(pd.to_datetime(df_filtered["data"]).dt.year==y) & (pd.to_datetime(df_filtered["data"]).dt.month==m)]
+if tipas_filter != "Visi":
+    df_filtered = df_filtered[df_filtered["tipas"]==tipas_filter]
+if cat_filter != "Visi":
+    df_filtered = df_filtered[df_filtered["kategorija"]==cat_filter]
 
 # KPI
-s_inc = df.loc[df["tipas"]=="Pajamos","suma_eur"].sum()
-s_exp = df.loc[df["tipas"]=="Išlaidos","suma_eur"].sum()
+s_inc = df_filtered.loc[df_filtered["tipas"]=="Pajamos","suma_eur"].sum()
+s_exp = df_filtered.loc[df_filtered["tipas"]=="Išlaidos","suma_eur"].sum()
 s_bal = s_inc - s_exp
+
+st.subheader("📊 Suvestinė")
 c1, c2, c3 = st.columns(3)
 c1.metric("Pajamos", money(s_inc))
 c2.metric("Išlaidos", money(s_exp))
 c3.metric("Balansas", money(s_bal))
 
 # Excel parsisiuntimas
-xlsb = to_excel_bytes(df)
+xlsb = to_excel_bytes(df_filtered)
 st.download_button(
     "⬇️ Parsisiųsti Excel",
     data=xlsb,
@@ -159,14 +187,42 @@ st.download_button(
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# Išlaidų diagrama pagal kategorijas
-df_plot = df[df["tipas"]=="Išlaidos"]
-if not df_plot.empty:
-    fig = px.pie(
-        df_plot,
-        names="kategorija",
-        values="suma_eur",
-        title="Išlaidos pagal kategorijas",
-        hole=0.5
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# Lentele su redagavimu ir trinimu
+st.subheader("🗂️ Įrašai")
+edited_df = st.data_editor(df_filtered, num_rows="dynamic", use_container_width=True)
+
+if st.button("💾 Išsaugoti pakeitimus"):
+    for _, row in edited_df.iterrows():
+        supabase.table(TABLE).update({
+            "data": row["data"].isoformat(),
+            "tipas": row["tipas"],
+            "kategorija": row["kategorija"],
+            "prekybos_centras": row["prekybos_centras"],
+            "aprasymas": row["aprasymas"],
+            "suma_eur": float(row["suma_eur"])
+        }).eq("id", row["id"]).execute()
+    st.success("Pakeitimai išsaugoti!")
+
+# Ištrynimas
+st.subheader("🗑️ Ištrinti įrašus")
+to_delete = st.multiselect("Pasirink įrašus trinti", df_filtered["id"])
+if st.button("🗑️ Ištrinti pažymėtus"):
+    for del_id in to_delete:
+        supabase.table(TABLE).delete().eq("id", del_id).execute()
+    st.success("Įrašai ištrinti!")
+
+# Diagramos
+st.subheader("📈 Diagramos")
+
+# Išlaidos pagal kategorijas
+if not df_filtered.empty:
+    fig1 = px.pie(df_filtered[df_filtered["tipas"]=="Išlaidos"], names="kategorija", values="suma_eur",
+                 title="Išlaidos pagal kategorijas", hole=0.5)
+    st.plotly_chart(fig1, use_container_width=True)
+
+# Pajamos vs Išlaidos per laiką
+if not df_filtered.empty:
+    df_time = df_filtered.groupby(["data","tipas"])["suma_eur"].sum().reset_index()
+    fig2 = px.bar(df_time, x="data", y="suma_eur", color="tipas", barmode="group",
+                  title="Pajamos vs Išlaidos per laiką")
+    st.plotly_chart(fig2, use_container_width=True)
