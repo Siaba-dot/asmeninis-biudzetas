@@ -2,197 +2,232 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import date
-import uuid
+from supabase import create_client
+from supabase.client import Client
+import io
 
-# -------------------------
-# KONFIGŪRACIJA
-# -------------------------
-st.set_page_config(page_title="Asmeninis biudžetas", layout="wide")
+st.set_page_config(page_title="💶 Asmeninis biudžetas", layout="wide")
 
-DATA_FILE = "data.csv"
+# ======================================================
+# Supabase
+# ======================================================
+@st.cache_resource
+def get_supabase() -> Client:
+    return create_client(
+        st.secrets["supabase"]["url"],
+        st.secrets["supabase"]["anon_key"]
+    )
 
-# -------------------------
-# USER
-# -------------------------
-if "user_id" not in st.session_state:
-    st.session_state.user_id = "sigita"  # gali pakeisti į loginą vėliau
+supabase = get_supabase()
+TABLE = "biudzetas"
+CURRENCY = "€"
 
-USER_ID = st.session_state.user_id
-
-# -------------------------
-# DUOMENYS
-# -------------------------
-def load_data():
+# ======================================================
+# AUTH
+# ======================================================
+def login(email, password):
     try:
-        df = pd.read_csv(DATA_FILE, parse_dates=["data"])
-    except FileNotFoundError:
-        df = pd.DataFrame(
-            columns=[
-                "id", "user_id", "data",
-                "tipas", "kategorija", "suma", "komentaras"
-            ]
+        supabase.auth.sign_in_with_password(
+            {"email": email, "password": password}
         )
+        return True
+    except Exception:
+        return False
+
+def logout():
+    supabase.auth.sign_out()
+    st.session_state.clear()
+    st.stop()
+
+if "authenticated" not in st.session_state:
+    st.title("🔐 Prisijungimas")
+    email = st.text_input("El. paštas")
+    password = st.text_input("Slaptažodis", type="password")
+    if st.button("Prisijungti"):
+        if login(email, password):
+            st.session_state["authenticated"] = True
+            st.session_state["email"] = email
+            st.success("Prisijungta")
+            st.stop()
+        else:
+            st.error("Neteisingi duomenys")
+    st.stop()
+
+st.sidebar.success(f"👤 {st.session_state['email']}")
+if st.sidebar.button("🚪 Atsijungti"):
+    logout()
+
+USER_EMAIL = st.session_state["email"]
+
+# ======================================================
+# DATA
+# ======================================================
+@st.cache_data
+def fetch_user_data(email: str) -> pd.DataFrame:
+    data = (
+        supabase.table(TABLE)
+        .select("*")
+        .eq("user_email", email)
+        .order("data")
+        .execute()
+        .data
+        or []
+    )
+    df = pd.DataFrame(data)
+    if df.empty:
+        return df
+
+    df["data"] = pd.to_datetime(df["data"])
+    df["suma_eur"] = pd.to_numeric(df["suma_eur"], errors="coerce").fillna(0.0)
+    df["year"] = df["data"].dt.year
+    df["month"] = df["data"].dt.to_period("M").astype(str)
     return df
 
-def save_data(df):
-    df.to_csv(DATA_FILE, index=False)
+def insert_row(d, tipas, kategorija, prekyba, aprasymas, suma):
+    supabase.table(TABLE).insert({
+        "user_email": USER_EMAIL,
+        "data": d.isoformat(),
+        "tipas": tipas,
+        "kategorija": kategorija,
+        "prekybos_centras": prekyba,
+        "aprasymas": aprasymas,
+        "suma_eur": float(suma)
+    }).execute()
+    st.cache_data.clear()
 
-df = load_data()
-df_user = df[df["user_id"] == USER_ID].copy()
+def delete_row(row_id):
+    supabase.table(TABLE).delete().eq("id", row_id).execute()
+    st.cache_data.clear()
 
-# -------------------------
-# NAUJAS ĮRAŠAS
-# -------------------------
-st.sidebar.header("➕ Naujas įrašas")
+# ======================================================
+# UI – ENTRY
+# ======================================================
+st.title("💶 Asmeninis biudžetas")
 
-with st.sidebar.form("new_entry"):
-    data = st.date_input("Data", date.today())
-    tipas = st.selectbox("Tipas", ["Pajamos", "Išlaidos"])
-    kategorija = st.text_input("Kategorija")
-    suma = st.number_input("Suma (€)", step=1.0)
-    komentaras = st.text_input("Komentaras")
-    submitted = st.form_submit_button("Pridėti")
+with st.expander("➕ Naujas įrašas", expanded=True):
+    with st.form("entry"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            d = st.date_input("Data", date.today())
+        with c2:
+            tipas = st.selectbox("Tipas", ["Pajamos", "Išlaidos"])
+        with c3:
+            suma = st.number_input("Suma (€)", min_value=0.0, step=1.0)
 
-    if submitted:
-        new_row = {
-            "id": str(uuid.uuid4()),
-            "user_id": USER_ID,
-            "data": pd.to_datetime(data),
-            "tipas": tipas,
-            "kategorija": kategorija,
-            "suma": float(suma),
-            "komentaras": komentaras
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        save_data(df)
-        st.rerun()
+        kategorija = st.text_input("Kategorija")
+        prekyba = st.text_input("Prekybos vieta (nebūtina)")
+        aprasymas = st.text_input("Aprašymas (nebūtina)")
 
-# -------------------------
-# FILTRAI
-# -------------------------
-st.header("📊 Biudžeto analizė")
+        if st.form_submit_button("💾 Išsaugoti"):
+            insert_row(d, tipas, kategorija, prekyba, aprasymas, suma)
+            st.success("Įrašyta")
 
-df_user["year"] = df_user["data"].dt.year
-df_user["month"] = df_user["data"].dt.to_period("M").astype(str)
+# ======================================================
+# LOAD DATA
+# ======================================================
+df = fetch_user_data(USER_EMAIL)
 
-period_type = st.selectbox(
-    "Laikotarpis",
-    ["Visas laikotarpis", "Metai", "Mėnesiai"]
-)
+if df.empty:
+    st.info("Dar nėra įrašų")
+    st.stop()
 
-if period_type == "Metai":
-    year = st.selectbox("Metai", sorted(df_user["year"].unique()))
-    df_f = df_user[df_user["year"] == year]
+# ======================================================
+# FILTERS
+# ======================================================
+st.subheader("🔎 Filtrai")
 
-elif period_type == "Mėnesiai":
-    month = st.selectbox("Mėnuo", sorted(df_user["month"].unique()))
-    df_f = df_user[df_user["month"] == month]
+c1, c2 = st.columns(2)
+with c1:
+    year_filter = st.selectbox(
+        "Metai",
+        ["Visi"] + sorted(df["year"].unique().tolist())
+    )
+with c2:
+    month_filter = st.selectbox(
+        "Mėnuo",
+        ["Visi"] + sorted(df["month"].unique().tolist())
+    )
 
-else:
-    df_f = df_user.copy()
+df_f = df.copy()
+if year_filter != "Visi":
+    df_f = df_f[df_f["year"] == year_filter]
+if month_filter != "Visi":
+    df_f = df_f[df_f["month"] == month_filter]
 
-# -------------------------
+# ======================================================
 # KPI
-# -------------------------
-pajamos = df_f[df_f["tipas"] == "Pajamos"]["suma"].sum()
-islaidos = df_f[df_f["tipas"] == "Išlaidos"]["suma"].sum()
-balansas = pajamos - islaidos
+# ======================================================
+income = df_f[df_f["tipas"] == "Pajamos"]["suma_eur"].sum()
+expense = df_f[df_f["tipas"] == "Išlaidos"]["suma_eur"].sum()
+balance = income - expense
 
-c1, c2, c3 = st.columns(3)
-c1.metric("💰 Pajamos", f"{pajamos:.2f} €")
-c2.metric("💸 Išlaidos", f"{islaidos:.2f} €")
-c3.metric("📈 Balansas", f"{balansas:.2f} €")
+st.subheader("📊 KPI")
+k1, k2, k3 = st.columns(3)
+k1.metric("Pajamos", f"{income:,.2f} €")
+k2.metric("Išlaidos", f"{expense:,.2f} €")
+k3.metric("Balansas", f"{balance:,.2f} €")
 
-# -------------------------
-# GRAFIKAI
-# -------------------------
-st.subheader("📈 Pajamos vs Išlaidos")
-
-df_bar = (
-    df_f.groupby(["month", "tipas"])["suma"]
-    .sum()
-    .reset_index()
-)
-
-fig_bar = px.bar(
-    df_bar,
-    x="month",
-    y="suma",
-    color="tipas",
-    barmode="group"
-)
-st.plotly_chart(fig_bar, use_container_width=True)
-
-# -------------------------
-# KATEGORIJOS (SUMOS)
-# -------------------------
-st.subheader("📊 Išlaidos pagal kategorijas (€)")
-
-df_cat = (
-    df_f[df_f["tipas"] == "Išlaidos"]
-    .groupby("kategorija")["suma"]
-    .sum()
-    .reset_index()
-)
-
-fig_cat = px.pie(
-    df_cat,
-    values="suma",
-    names="kategorija",
-    hole=0.4
-)
-st.plotly_chart(fig_cat, use_container_width=True)
-
-# -------------------------
-# BALANSO DINAMIKA
-# -------------------------
-st.subheader("📉 Balanso kitimas")
-
-df_balance = df_user.sort_values("data").copy()
-df_balance["signed"] = df_balance.apply(
-    lambda r: r["suma"] if r["tipas"] == "Pajamos" else -r["suma"],
-    axis=1
-)
-df_balance["balansas"] = df_balance["signed"].cumsum()
-
-fig_balance = px.line(
-    df_balance,
-    x="data",
-    y="balansas"
-)
-st.plotly_chart(fig_balance, use_container_width=True)
-
-# -------------------------
-# ĮRAŠŲ LENTELĖ (EDIT / DELETE)
-# -------------------------
-st.subheader("🗑️ Redaguoti / trinti įrašus")
+# ======================================================
+# TABLE + DELETE
+# ======================================================
+st.subheader("📋 Įrašai")
 
 for _, r in df_f.sort_values("data", ascending=False).iterrows():
-    with st.expander(f"{r['data'].date()} | {r['tipas']} | {r['suma']} €"):
-        col1, col2 = st.columns(2)
+    cols = st.columns([1.2, 1.2, 2, 1, 0.5])
+    cols[0].write(r["data"].date())
+    cols[1].write(r["tipas"])
+    cols[2].write(r["kategorija"])
+    cols[3].write(f"{r['suma_eur']:.2f} €")
+    if cols[4].button("🗑️", key=r["id"]):
+        delete_row(r["id"])
+        st.stop()
 
-        with col1:
-            if st.button("❌ Trinti", key=f"del_{r['id']}"):
-                df = df[df["id"] != r["id"]]
-                save_data(df)
-                st.rerun()
+# ======================================================
+# CHARTS
+# ======================================================
+st.subheader("📈 Analitika")
 
-        with col2:
-            with st.form(f"edit_{r['id']}"):
-                new_sum = st.number_input(
-                    "Suma",
-                    value=float(r["suma"]),
-                    key=f"s_{r['id']}"
-                )
-                new_cat = st.text_input(
-                    "Kategorija",
-                    value=r["kategorija"],
-                    key=f"k_{r['id']}"
-                )
-                save = st.form_submit_button("💾 Išsaugoti")
+df_cum = (
+    df.sort_values("data")
+      .assign(
+          signed=lambda x: x["suma_eur"].where(
+              x["tipas"] == "Pajamos", -x["suma_eur"]
+          )
+      )
+)
+df_cum["balansas"] = df_cum["signed"].cumsum()
 
-                if save:
-                    df.loc[df["id"] == r["id"], "suma"] = new_sum
-                    df.loc[df["id"] == r["id"], "kategorija"] = new_cat
-                    save_data(df)
-                    st.rerun()
+fig_bal = px.line(
+    df_cum,
+    x="data",
+    y="balansas",
+    title="Kaupiamasis balansas"
+)
+st.plotly_chart(fig_bal, use_container_width=True)
+
+df_exp = df_f[df_f["tipas"] == "Išlaidos"]
+if not df_exp.empty:
+    fig_cat = px.pie(
+        df_exp,
+        names="kategorija",
+        values="suma_eur",
+        title="Išlaidos pagal kategorijas"
+    )
+    st.plotly_chart(fig_cat, use_container_width=True)
+
+# ======================================================
+# EXPORT
+# ======================================================
+st.subheader("⬇️ Eksportas")
+
+bio = io.BytesIO()
+with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+    df_f.to_excel(writer, index=False)
+bio.seek(0)
+
+st.download_button(
+    "Parsisiųsti Excel",
+    data=bio.read(),
+    file_name="biudzetas.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
