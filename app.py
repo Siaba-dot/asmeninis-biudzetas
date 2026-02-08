@@ -2,202 +2,197 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import date
-from supabase import create_client
-from supabase.client import Client
-import io
 import uuid
 
-# =========================
-# Supabase klientas
-# =========================
-@st.cache_resource(show_spinner=False)
-def get_supabase() -> Client:
-    return create_client(
-        st.secrets["supabase"]["url"],
-        st.secrets["supabase"]["anon_key"]
-    )
+# -------------------------
+# KONFIGŪRACIJA
+# -------------------------
+st.set_page_config(page_title="Asmeninis biudžetas", layout="wide")
 
-supabase = get_supabase()
+DATA_FILE = "data.csv"
 
-# =========================
-# Login
-# =========================
-def login(email, password):
+# -------------------------
+# USER
+# -------------------------
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "sigita"  # gali pakeisti į loginą vėliau
+
+USER_ID = st.session_state.user_id
+
+# -------------------------
+# DUOMENYS
+# -------------------------
+def load_data():
     try:
-        supabase.auth.sign_in_with_password(
-            {"email": email, "password": password}
+        df = pd.read_csv(DATA_FILE, parse_dates=["data"])
+    except FileNotFoundError:
+        df = pd.DataFrame(
+            columns=[
+                "id", "user_id", "data",
+                "tipas", "kategorija", "suma", "komentaras"
+            ]
         )
-        return True
-    except:
-        return False
-
-def logout():
-    supabase.auth.sign_out()
-    st.session_state.clear()
-    st.rerun()
-
-if "auth" not in st.session_state:
-    st.title("🔐 Prisijungimas")
-    email = st.text_input("El. paštas")
-    password = st.text_input("Slaptažodis", type="password")
-    if st.button("Prisijungti"):
-        if login(email, password):
-            st.session_state.auth = True
-            st.session_state.email = email
-            st.rerun()
-        else:
-            st.error("❌ Blogi duomenys")
-    st.stop()
-
-st.success(f"Prisijungta: **{st.session_state.email}**")
-if st.button("🚪 Atsijungti"):
-    logout()
-
-# =========================
-# Konfigūracija
-# =========================
-TABLE = "biudzetas"
-CURRENCY = "€"
-
-def money(x):
-    return f"{x:,.2f} €".replace(",", " ")
-
-# =========================
-# Duomenys
-# =========================
-@st.cache_data(ttl=60)
-def fetch_data():
-    data = (
-        supabase.table(TABLE)
-        .select("*")
-        .eq("user_email", st.session_state.email)
-        .order("data", desc=True)
-        .execute()
-        .data
-        or []
-    )
-    df = pd.DataFrame(data)
-    if not df.empty:
-        df["data"] = pd.to_datetime(df["data"])
-        df["suma_eur"] = pd.to_numeric(df["suma_eur"])
     return df
 
-def insert_row(d, tipas, kat, merch, desc, suma):
-    payload = {
-        "id": str(uuid.uuid4()),
-        "user_email": st.session_state.email,
-        "data": d.isoformat(),
-        "tipas": tipas,
-        "kategorija": kat,
-        "prekybos_centras": merch or "",
-        "aprasymas": desc or "",
-        "suma_eur": float(suma)
-    }
-    supabase.table(TABLE).insert(payload).execute()
-    st.cache_data.clear()
-    st.rerun()
+def save_data(df):
+    df.to_csv(DATA_FILE, index=False)
 
-def delete_row(row_id):
-    supabase.table(TABLE).delete().eq("id", row_id).execute()
-    st.cache_data.clear()
-    st.rerun()
+df = load_data()
+df_user = df[df["user_id"] == USER_ID].copy()
 
-# =========================
-# Įvedimas
-# =========================
-st.subheader("📝 Naujas įrašas")
-with st.form("add"):
-    d = st.date_input("Data", value=date.today())
-    t = st.selectbox("Tipas", ["Išlaidos", "Pajamos"])
-    s = st.number_input("Suma €", min_value=0.0)
-    k = st.text_input("Kategorija")
-    m = st.text_input("Prekybos centras")
-    a = st.text_input("Aprašymas")
-    if st.form_submit_button("💾 Išsaugoti"):
-        insert_row(d, t, k, m, a, s)
+# -------------------------
+# NAUJAS ĮRAŠAS
+# -------------------------
+st.sidebar.header("➕ Naujas įrašas")
 
-# =========================
-# Filtrai
-# =========================
-df = fetch_data()
+with st.sidebar.form("new_entry"):
+    data = st.date_input("Data", date.today())
+    tipas = st.selectbox("Tipas", ["Pajamos", "Išlaidos"])
+    kategorija = st.text_input("Kategorija")
+    suma = st.number_input("Suma (€)", step=1.0)
+    komentaras = st.text_input("Komentaras")
+    submitted = st.form_submit_button("Pridėti")
 
-st.subheader("🔎 Filtrai")
-years = ["Visi"] + sorted(df["data"].dt.year.unique().astype(str).tolist()) if not df.empty else ["Visi"]
-months = ["Visi"] + sorted(df["data"].dt.to_period("M").astype(str).unique().tolist()) if not df.empty else ["Visi"]
+    if submitted:
+        new_row = {
+            "id": str(uuid.uuid4()),
+            "user_id": USER_ID,
+            "data": pd.to_datetime(data),
+            "tipas": tipas,
+            "kategorija": kategorija,
+            "suma": float(suma),
+            "komentaras": komentaras
+        }
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        save_data(df)
+        st.rerun()
 
-y = st.selectbox("Metai", years)
-m = st.selectbox("Mėnuo", months)
+# -------------------------
+# FILTRAI
+# -------------------------
+st.header("📊 Biudžeto analizė")
 
-df_f = df.copy()
-if y != "Visi":
-    df_f = df_f[df_f["data"].dt.year == int(y)]
-if m != "Visi":
-    df_f = df_f[df_f["data"].dt.to_period("M").astype(str) == m]
+df_user["year"] = df_user["data"].dt.year
+df_user["month"] = df_user["data"].dt.to_period("M").astype(str)
 
-# =========================
+period_type = st.selectbox(
+    "Laikotarpis",
+    ["Visas laikotarpis", "Metai", "Mėnesiai"]
+)
+
+if period_type == "Metai":
+    year = st.selectbox("Metai", sorted(df_user["year"].unique()))
+    df_f = df_user[df_user["year"] == year]
+
+elif period_type == "Mėnesiai":
+    month = st.selectbox("Mėnuo", sorted(df_user["month"].unique()))
+    df_f = df_user[df_user["month"] == month]
+
+else:
+    df_f = df_user.copy()
+
+# -------------------------
 # KPI
-# =========================
-inc = df_f[df_f["tipas"] == "Pajamos"]["suma_eur"].sum()
-exp = df_f[df_f["tipas"] == "Išlaidos"]["suma_eur"].sum()
+# -------------------------
+pajamos = df_f[df_f["tipas"] == "Pajamos"]["suma"].sum()
+islaidos = df_f[df_f["tipas"] == "Išlaidos"]["suma"].sum()
+balansas = pajamos - islaidos
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Pajamos", money(inc))
-c2.metric("Išlaidos", money(exp))
-c3.metric("Balansas", money(inc - exp))
+c1.metric("💰 Pajamos", f"{pajamos:.2f} €")
+c2.metric("💸 Išlaidos", f"{islaidos:.2f} €")
+c3.metric("📈 Balansas", f"{balansas:.2f} €")
 
-# =========================
-# Excel
-# =========================
-if not df_f.empty:
-    bio = io.BytesIO()
-    df_f.to_excel(bio, index=False)
-    st.download_button(
-        "⬇️ Parsisiųsti Excel",
-        bio.getvalue(),
-        file_name="biudzetas.xlsx"
-    )
+# -------------------------
+# GRAFIKAI
+# -------------------------
+st.subheader("📈 Pajamos vs Išlaidos")
 
-# =========================
-# Lentelė + trynimas
-# =========================
-st.subheader("📋 Įrašai")
+df_bar = (
+    df_f.groupby(["month", "tipas"])["suma"]
+    .sum()
+    .reset_index()
+)
 
-for _, r in df_f.iterrows():
-    c1, c2 = st.columns([8,1])
-    c1.write(f"{r['data'].date()} | {r['tipas']} | {r['kategorija']} | {money(r['suma_eur'])}")
-    if c2.button("🗑️", key=r["id"]):
-        delete_row(r["id"])
+fig_bar = px.bar(
+    df_bar,
+    x="month",
+    y="suma",
+    color="tipas",
+    barmode="group"
+)
+st.plotly_chart(fig_bar, use_container_width=True)
 
-# =========================
-# Diagramos
-# =========================
-st.subheader("📊 Diagramos")
+# -------------------------
+# KATEGORIJOS (SUMOS)
+# -------------------------
+st.subheader("📊 Išlaidos pagal kategorijas (€)")
 
-if not df_f.empty:
-    exp_df = df_f[df_f["tipas"] == "Išlaidos"]
-    if not exp_df.empty:
-        fig1 = px.pie(
-            exp_df,
-            names="kategorija",
-            values="suma_eur",
-            title="Išlaidos pagal kategorijas"
-        )
-        st.plotly_chart(fig1, use_container_width=True)
+df_cat = (
+    df_f[df_f["tipas"] == "Išlaidos"]
+    .groupby("kategorija")["suma"]
+    .sum()
+    .reset_index()
+)
 
-    ts = (
-        df_f
-        .groupby([df_f["data"].dt.to_period("M"), "tipas"])["suma_eur"]
-        .sum()
-        .reset_index()
-    )
-    ts["data"] = ts["data"].astype(str)
+fig_cat = px.pie(
+    df_cat,
+    values="suma",
+    names="kategorija",
+    hole=0.4
+)
+st.plotly_chart(fig_cat, use_container_width=True)
 
-    fig2 = px.line(
-        ts,
-        x="data",
-        y="suma_eur",
-        color="tipas",
-        title="Pajamos vs išlaidos per laiką"
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+# -------------------------
+# BALANSO DINAMIKA
+# -------------------------
+st.subheader("📉 Balanso kitimas")
 
+df_balance = df_user.sort_values("data").copy()
+df_balance["signed"] = df_balance.apply(
+    lambda r: r["suma"] if r["tipas"] == "Pajamos" else -r["suma"],
+    axis=1
+)
+df_balance["balansas"] = df_balance["signed"].cumsum()
+
+fig_balance = px.line(
+    df_balance,
+    x="data",
+    y="balansas"
+)
+st.plotly_chart(fig_balance, use_container_width=True)
+
+# -------------------------
+# ĮRAŠŲ LENTELĖ (EDIT / DELETE)
+# -------------------------
+st.subheader("🗑️ Redaguoti / trinti įrašus")
+
+for _, r in df_f.sort_values("data", ascending=False).iterrows():
+    with st.expander(f"{r['data'].date()} | {r['tipas']} | {r['suma']} €"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("❌ Trinti", key=f"del_{r['id']}"):
+                df = df[df["id"] != r["id"]]
+                save_data(df)
+                st.rerun()
+
+        with col2:
+            with st.form(f"edit_{r['id']}"):
+                new_sum = st.number_input(
+                    "Suma",
+                    value=float(r["suma"]),
+                    key=f"s_{r['id']}"
+                )
+                new_cat = st.text_input(
+                    "Kategorija",
+                    value=r["kategorija"],
+                    key=f"k_{r['id']}"
+                )
+                save = st.form_submit_button("💾 Išsaugoti")
+
+                if save:
+                    df.loc[df["id"] == r["id"], "suma"] = new_sum
+                    df.loc[df["id"] == r["id"], "kategorija"] = new_cat
+                    save_data(df)
+                    st.rerun()
