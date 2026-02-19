@@ -1,45 +1,92 @@
 # sb_auth.py
 import streamlit as st
 from supabase import Client
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
-# --- Sesijos helperiai ---
-def get_session():
-    """Gauk dabartinę Supabase sesiją iš session_state (jei jau prisijungta)."""
-    return st.session_state.get("sb_session")
+# -----------------------------
+# Session helpers
+# -----------------------------
+SESSION_KEY = "sb_session"
 
-def set_session(session):
+def get_session() -> Any:
+    return st.session_state.get(SESSION_KEY)
+
+def set_session(session: Any) -> None:
     """
-    Išsaugok sesiją į session_state.
-    Jei tai pydantic modelis – konvertuojam į dict, kad vėliau netrūktų .get().
+    Save Supabase session into Streamlit session_state.
+    Supports pydantic v1/v2 or dict.
     """
+    if session is None:
+        st.session_state.pop(SESSION_KEY, None)
+        return
+
+    # Try pydantic v2
     try:
-        # Pydantic v2
-        st.session_state["sb_session"] = session.model_dump()
+        st.session_state[SESSION_KEY] = session.model_dump()
+        return
     except Exception:
-        try:
-            # Pydantic v1
-            st.session_state["sb_session"] = session.dict()
-        except Exception:
-            # Jei jau yra dict arba paprastas objektas – saugom tiesiogiai
-            st.session_state["sb_session"] = session
+        pass
 
-def clear_session():
-    # Minimaliai išvalom mūsų naudojamus raktus
-    st.session_state.pop("sb_session", None)
-    st.session_state.pop("refresh_key", None)
-    st.session_state.pop("login_email", None)
-    st.session_state.pop("login_pwd", None)
-    st.session_state.pop("magic_email", None)
+    # Try pydantic v1
+    try:
+        st.session_state[SESSION_KEY] = session.dict()
+        return
+    except Exception:
+        pass
 
-# --- Auth veiksmai ---
-def sign_out(supabase: Client):
+    # Already dict / plain object
+    st.session_state[SESSION_KEY] = session
+
+def clear_session_state() -> None:
+    for k in [SESSION_KEY, "login_email", "login_pwd", "magic_email"]:
+        st.session_state.pop(k, None)
+
+def _get_tokens_from_session(sb_sess: Any) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract access_token and refresh_token from stored session.
+    """
+    if sb_sess is None:
+        return None, None
+
+    if isinstance(sb_sess, dict):
+        return sb_sess.get("access_token"), sb_sess.get("refresh_token")
+
+    # Object-like (pydantic model etc.)
+    return getattr(sb_sess, "access_token", None), getattr(sb_sess, "refresh_token", None)
+
+def restore_session_into_client(supabase: Client) -> bool:
+    """
+    IMPORTANT: Streamlit reruns the script; supabase client may lose auth state.
+    This restores the session into the client using stored tokens.
+    Returns True if restored and user is valid.
+    """
+    sb_sess = get_session()
+    access_token, refresh_token = _get_tokens_from_session(sb_sess)
+
+    if not access_token or not refresh_token:
+        return False
+
+    try:
+        # supabase-py v2
+        supabase.auth.set_session(access_token, refresh_token)
+        supabase.auth.get_user()  # validate
+        return True
+    except Exception:
+        # Session invalid/expired
+        return False
+
+
+# -----------------------------
+# Auth actions
+# -----------------------------
+def sign_out(supabase: Client) -> None:
     try:
         supabase.auth.sign_out()
+    except Exception:
+        pass
     finally:
-        # 1) Išvalom mūsų sesiją/būseną
-        clear_session()
-        # 2) Išvalom Streamlit kešus, kad kitas run'as gautų švarią būseną
+        clear_session_state()
+        # optional cache clear
         try:
             st.cache_data.clear()
         except Exception:
@@ -58,87 +105,98 @@ def sign_in_password(supabase: Client, email: str, password: str) -> Optional[st
         return str(e)
 
 def sign_up_password(supabase: Client, email: str, password: str) -> Optional[str]:
+    """
+    Creates user. If 'Confirm email' is ON in Supabase, user must confirm via email
+    before password sign-in will succeed (often looks like "invalid login credentials").
+    """
     try:
-        _ = supabase.auth.sign_up({"email": email, "password": password})
-        # Jei Supabase'e įjungtas email confirm, vartotojas turės patvirtinti laišku.
+        res = supabase.auth.sign_up({"email": email, "password": password})
+        # Some configs may return session immediately; store it if exists.
+        try:
+            if getattr(res, "session", None) is not None:
+                set_session(res.session)
+        except Exception:
+            pass
         return None
     except Exception as e:
         return str(e)
 
 def send_magic_link(supabase: Client, email: str) -> Optional[str]:
     try:
+        # shouldCreateUser=True allows new user creation via magic link
         supabase.auth.sign_in_with_otp({"email": email, "shouldCreateUser": True})
         return None
     except Exception as e:
         return str(e)
 
-# --- Vidinis helperis: saugiai paimti access_token ---
-def _get_token_from_session(sb_sess: Any):
-    if sb_sess is None:
-        return None
-    # dict atvejis
-    if isinstance(sb_sess, dict):
-        return sb_sess.get("access_token")
-    # pydantic modelis ar kitas objektas
-    return getattr(sb_sess, "access_token", None)
 
-# --- UI ---
+# -----------------------------
+# UI
+# -----------------------------
 def render_auth_ui(supabase: Client) -> bool:
     """
-    Rodo login UI jei vartotojas NE prisijungęs.
-    Grąžina True, jei prisijungta; False, jei dar reikia prisijungti.
+    If already authenticated -> True
+    Otherwise show auth UI -> False
     """
-    # 1) Tiesioginis patikrinimas: jei get_user suveikia – esam prisijungę
+
+    # 0) Try restoring auth from Streamlit session_state into supabase client
+    if restore_session_into_client(supabase):
+        return True
+
+    # 1) If client already has valid user (e.g., same run right after login)
     try:
         supabase.auth.get_user()
         return True
     except Exception:
-        pass  # neturim galiojančios sesijos supabase kliente – rodysim UI
+        pass
 
-    # 2) Fallback: jei turim cache'intą sesiją – pabandykim vėl
-    sb_sess = get_session()
-    token = _get_token_from_session(sb_sess)
-    if token:
-        try:
-            supabase.auth.get_user()
-            return True
-        except Exception:
-            # Sesija pasibaigė ar neteisinga – išvalom ir rodome login UI
-            sign_out(supabase)
+    st.markdown("## Prisijungimas")
 
-    st.markdown("### Prisijungimas")
     tabs = st.tabs(["El. paštas + slaptažodis", "Magic link"])
 
-    # --- Email + password ---
+    # --- Email + password tab ---
     with tabs[0]:
         with st.form("login_form", clear_on_submit=False):
             email = st.text_input("El. paštas", key="login_email")
             password = st.text_input("Slaptažodis", type="password", key="login_pwd")
-            c1, c2 = st.columns(2)
-            submit = c1.form_submit_button("Prisijungti")
-            create = c2.form_submit_button("Sukurti paskyrą")
-        if submit:
-            err = sign_in_password(supabase, email, password)
+
+            c1, c2, c3 = st.columns([1, 1, 1])
+            btn_login = c1.form_submit_button("Prisijungti")
+            btn_signup = c2.form_submit_button("Sukurti paskyrą")
+            btn_logout = c3.form_submit_button("Atsijungti")
+
+        if btn_logout:
+            sign_out(supabase)
+            st.rerun()
+
+        if btn_login:
+            err = sign_in_password(supabase, email.strip(), password)
             if err:
-                st.error(f"Nepavyko prisijungti: {err}")
+                # Supabase tyčia dažnai grąžina "invalid login credentials"
+                st.error("Neteisingi duomenys arba nepatvirtintas el. paštas.")
+                st.caption(f"Techninė klaida: {err}")
             else:
                 st.rerun()
-        if create:
-            err = sign_up_password(supabase, email, password)
-            if err:
-                st.error(f"Nepavyko sukurti paskyros: {err}")
-            else:
-                st.success("Paskyra sukurta. Jei reikia — patvirtink el. pašte.")
 
-    # --- Magic link ---
+        if btn_signup:
+            err = sign_up_password(supabase, email.strip(), password)
+            if err:
+                st.error("Nepavyko sukurti paskyros.")
+                st.caption(f"Techninė klaida: {err}")
+            else:
+                st.success("Paskyra sukurta. Jei reikia — patvirtink el. pašte (jei įjungtas Confirm email).")
+
+    # --- Magic link tab ---
     with tabs[1]:
         with st.form("magic_form", clear_on_submit=False):
             email2 = st.text_input("El. paštas (atsiųsime vienkartinę nuorodą)", key="magic_email")
-            send = st.form_submit_button("Siųsti magic link")
-        if send:
-            err = send_magic_link(supabase, email2)
+            btn_send = st.form_submit_button("Siųsti magic link")
+
+        if btn_send:
+            err = send_magic_link(supabase, email2.strip())
             if err:
-                st.error(f"Nepavyko išsiųsti: {err}")
+                st.error("Nepavyko išsiųsti magic link.")
+                st.caption(f"Techninė klaida: {err}")
             else:
                 st.success("Nuoroda išsiųsta. Patikrink el. paštą.")
 
