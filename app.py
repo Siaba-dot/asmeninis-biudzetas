@@ -288,7 +288,8 @@ expense = df_f[df_f["tipas"] == "Išlaidos"]["suma_eur"].sum()
 balance = income - expense
 
 st.subheader("📊 KPI")
-k1, k2, k3, k4, k5 = st.columns(5)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 k1.metric("Pajamos", money(income))
 k2.metric("Išlaidos", money(expense))
@@ -299,8 +300,9 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# KPI: balanso pakaks (dienomis + iki kurios datos) — reaguoja į filtrus
+# 5–6 finansinė pagalvė ir vid. dienos išlaidos (pagal filtrus)
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
+
 days_available = None
 avg_daily_expense = None
 end_date = None
@@ -309,24 +311,32 @@ if not exp_daily.empty:
     active_days = exp_daily["data"].dt.date.nunique()
     if active_days > 0:
         avg_daily_expense = exp_daily["suma_eur"].sum() / active_days
+
         if avg_daily_expense > 0 and balance > 0:
             days_available = balance / avg_daily_expense
             end_date = date.today() + timedelta(days=int(days_available))
 
+# Finansinė pagalvė (dienos + data)
 if days_available is not None and end_date is not None:
     k5.metric(
-        "Balanso pakaks",
+        "Finansinė pagalvė",
         f"{days_available:.0f} d.",
-        delta=f"iki {end_date.isoformat()}",
+        delta=f"iki {end_date.isoformat()} | ~{money(avg_daily_expense)}/d.",
         delta_color="off"
     )
 else:
     k5.metric(
-        "Balanso pakaks",
+        "Finansinė pagalvė",
         "—",
-        delta="nėra pakankamai duomenų",
+        delta="nepakanka duomenų",
         delta_color="off"
     )
+
+# Vidutinės dienos išlaidos (matomas skaičius trendui)
+if avg_daily_expense is not None:
+    k6.metric("Vid. dienos išlaidos", money(avg_daily_expense))
+else:
+    k6.metric("Vid. dienos išlaidos", "—")
 
 # ======================================================
 # SMART INSIGHTS (NO AI)
@@ -468,6 +478,7 @@ else:
                 with b1:
                     if st.button("💾 Išsaugoti pakeitimus", key=f"save_{r['id']}"):
                         update_row(r["id"], new_d, new_t, new_k, new_p, new_a, new_s)
+
                 with b2:
                     if st.button("🗑️ Ištrinti įrašą", key=f"del_{r['id']}"):
                         delete_row(r["id"])
@@ -502,8 +513,13 @@ if not df_f.empty:
 exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
 if not exp_f.empty:
     cat_sum = exp_f.groupby("kategorija")["suma_eur"].sum().sort_values(ascending=False).reset_index()
-    fig_pie = px.pie(cat_sum, names="kategorija", values="suma_eur", hole=0.45,
-                     title="Išlaidos pagal kategorijas (sumos + %)")
+    fig_pie = px.pie(
+        cat_sum,
+        names="kategorija",
+        values="suma_eur",
+        hole=0.45,
+        title="Išlaidos pagal kategorijas (sumos + %)"
+    )
     st.plotly_chart(fig_pie, use_container_width=True)
 
     st.markdown("**Išlaidos pagal kategorijas (sumos):**")
