@@ -288,7 +288,8 @@ expense = df_f[df_f["tipas"] == "Išlaidos"]["suma_eur"].sum()
 balance = income - expense
 
 st.subheader("📊 KPI")
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
+
 k1.metric("Pajamos", money(income))
 k2.metric("Išlaidos", money(expense))
 k3.metric("Balansas", money(balance))
@@ -297,6 +298,31 @@ savings_rate = None
 if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
+
+# KPI: kiek dienų užtenka balanso (pagal filtrus)
+exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
+days_available = None
+avg_daily_expense = None
+
+if not exp_daily.empty:
+    active_days = exp_daily["data"].dt.date.nunique()
+    if active_days > 0:
+        avg_daily_expense = exp_daily["suma_eur"].sum() / active_days
+        if avg_daily_expense > 0 and balance > 0:
+            days_available = balance / avg_daily_expense
+
+if days_available is not None:
+    k5.metric(
+        "Balanso pakaks",
+        f"{days_available:.0f} d.",
+        help=f"Pagal filtrą: balansas / vid. dienos išlaidos. Vid. dienos išlaidos: {money(avg_daily_expense)}"
+    )
+else:
+    k5.metric(
+        "Balanso pakaks",
+        "—",
+        help="Reikia teigiamo balanso ir bent vienos dienos su išlaidomis pasirinktame filtre."
+    )
 
 # ======================================================
 # SMART INSIGHTS (NO AI)
@@ -384,7 +410,10 @@ if cur_idx is not None:
         if base > 0:
             diff = (cur_total - base) / base
             if diff >= (spike_pct / 100.0):
-                insights.append(f"⚠️ **Bendrai išlaidos** {current_month}: {money(cur_total)}. Tai ~{diff*100:.0f}% daugiau nei tavo {len(lookback_list)} mėn. vidurkis ({money(base)}).")
+                insights.append(
+                    f"⚠️ **Bendrai išlaidos** {current_month}: {money(cur_total)}. "
+                    f"Tai ~{diff*100:.0f}% daugiau nei tavo {len(lookback_list)} mėn. vidurkis ({money(base)})."
+                )
 
 if insights:
     for s in insights:
@@ -393,14 +422,14 @@ else:
     st.info("Dar per mažai duomenų insightams. Įvesk daugiau įrašų arba pasirink konkretų mėnesį.")
 
 # ======================================================
-# TABLE: edit + delete (PATAISYTA: scroll konteineris su ~10 matomų įrašų)
+# TABLE: edit + delete (scroll dėžutė)
 # ======================================================
 st.subheader("📋 Įrašai (redagavimas / trynimas)")
 
 if df_f.empty:
     st.info("Pagal pasirinktus filtrus įrašų nėra.")
 else:
-    # scroll dėžutė: matosi ~10 įrašų, likę scrollinasi viduje
+    # ~10 įrašų matomi, kiti scrollinasi dėžutės viduje
     with st.container(height=420, border=True):
         for _, r in df_f.sort_values("data", ascending=False).iterrows():
             title = f"{r['data'].date()} | {r['tipas']} | {r['kategorija']} | {money(r['suma_eur'])}"
@@ -435,7 +464,6 @@ else:
                 with b1:
                     if st.button("💾 Išsaugoti pakeitimus", key=f"save_{r['id']}"):
                         update_row(r["id"], new_d, new_t, new_k, new_p, new_a, new_s)
-
                 with b2:
                     if st.button("🗑️ Ištrinti įrašą", key=f"del_{r['id']}"):
                         delete_row(r["id"])
@@ -470,13 +498,8 @@ if not df_f.empty:
 exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
 if not exp_f.empty:
     cat_sum = exp_f.groupby("kategorija")["suma_eur"].sum().sort_values(ascending=False).reset_index()
-    fig_pie = px.pie(
-        cat_sum,
-        names="kategorija",
-        values="suma_eur",
-        hole=0.45,
-        title="Išlaidos pagal kategorijas (sumos + %)"
-    )
+    fig_pie = px.pie(cat_sum, names="kategorija", values="suma_eur", hole=0.45,
+                     title="Išlaidos pagal kategorijas (sumos + %)")
     st.plotly_chart(fig_pie, use_container_width=True)
 
     st.markdown("**Išlaidos pagal kategorijas (sumos):**")
@@ -498,3 +521,4 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
