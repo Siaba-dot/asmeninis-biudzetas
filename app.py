@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date
+from datetime import date, timedelta
 from supabase import create_client
 from supabase.client import Client
 import io
@@ -299,10 +299,11 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# KPI: kiek dienų užtenka balanso (pagal filtrus)
+# KPI: kiek dienų užtenka balanso + iki kurios datos (pagal filtrus)
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
 days_available = None
 avg_daily_expense = None
+end_date = None
 
 if not exp_daily.empty:
     active_days = exp_daily["data"].dt.date.nunique()
@@ -310,12 +311,16 @@ if not exp_daily.empty:
         avg_daily_expense = exp_daily["suma_eur"].sum() / active_days
         if avg_daily_expense > 0 and balance > 0:
             days_available = balance / avg_daily_expense
+            end_date = date.today() + timedelta(days=int(days_available))
 
-if days_available is not None:
+if days_available is not None and end_date is not None:
     k5.metric(
         "Balanso pakaks",
         f"{days_available:.0f} d.",
-        help=f"Pagal filtrą: balansas / vid. dienos išlaidos. Vid. dienos išlaidos: {money(avg_daily_expense)}"
+        help=(
+            f"Prognozė iki datos: {end_date.isoformat()} "
+            f"(pagal filtrą: balansas / vid. dienos išlaidos; vid. dienos išlaidos: {money(avg_daily_expense)})."
+        )
     )
 else:
     k5.metric(
@@ -521,4 +526,3 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
