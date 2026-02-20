@@ -300,23 +300,52 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# 5–6 finansinė pagalvė ir vid. dienos išlaidos (pagal filtrus)
+# 5–6 finansinė pagalvė ir vid. dienos išlaidos (pagal filtrus, per visas laikotarpio dienas)
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
 
 days_available = None
 avg_daily_expense = None
 end_date = None
 
-if not exp_daily.empty:
-    active_days = exp_daily["data"].dt.date.nunique()
-    if active_days > 0:
-        avg_daily_expense = exp_daily["suma_eur"].sum() / active_days
+# Laikotarpį dienoms skaičiuoti imame tik iš laiko filtrų (metai/mėnuo),
+# ne iš tipo/kategorijos, kad laikotarpis nesusitrauktų.
+df_time = df.copy()
+if year_filter != "Visi":
+    df_time = df_time[df_time["year"] == year_filter]
+if month_filter != "Visi":
+    df_time = df_time[df_time["month"] == month_filter]
 
-        if avg_daily_expense > 0 and balance > 0:
-            days_available = balance / avg_daily_expense
-            end_date = date.today() + timedelta(days=int(days_available))
+calendar_days = None
 
-# Finansinė pagalvė (dienos + data)
+if month_filter != "Visi":
+    # pilnas pasirinkto mėnesio kalendorius (1..paskutinė mėn. diena)
+    p = pd.Period(month_filter, freq="M")
+    min_day = p.start_time.date()
+    max_day = p.end_time.date()
+    calendar_days = (max_day - min_day).days + 1
+
+elif year_filter != "Visi":
+    # pilni pasirinkti metai (01-01 .. 12-31)
+    min_day = date(int(year_filter), 1, 1)
+    max_day = date(int(year_filter), 12, 31)
+    calendar_days = (max_day - min_day).days + 1
+
+else:
+    # visi duomenys: nuo seniausios iki naujausios datos (imtinai)
+    if not df_time.empty:
+        min_day = df_time["data"].min().date()
+        max_day = df_time["data"].max().date()
+        calendar_days = (max_day - min_day).days + 1
+
+# Vidurkis per VISAS kalendorines dienas laikotarpyje
+if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty):
+    avg_daily_expense = exp_daily["suma_eur"].sum() / calendar_days
+
+    if avg_daily_expense > 0 and balance > 0:
+        days_available = balance / avg_daily_expense
+        end_date = date.today() + timedelta(days=int(days_available))
+
+# Finansinė pagalvė (dienos + data + €/d)
 if days_available is not None and end_date is not None:
     k5.metric(
         "Finansinė pagalvė",
