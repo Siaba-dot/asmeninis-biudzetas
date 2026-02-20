@@ -5,20 +5,11 @@ from datetime import date
 from supabase import create_client
 from supabase.client import Client
 import io
-import requests
 
 st.set_page_config(page_title="💶 Asmeninis biudžetas", layout="wide")
 
-TABLE = "biudzetas"
-CURRENCY = "€"
-
-# === ĮRAŠYK SAVO EDGE FUNCTION URL ===
-# Jei tavo Supabase URL yra https://abcxyz.supabase.co, tai PROJECT_REF = abcxyz
-FUNCTION_URL = "https://<PROJECT_REF>.functions.supabase.co/delete-account"
-
-
 # ======================================================
-# Supabase client
+# Supabase
 # ======================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase() -> Client:
@@ -28,12 +19,14 @@ def get_supabase() -> Client:
     )
 
 supabase = get_supabase()
-
+TABLE = "biudzetas"
+CURRENCY = "€"
 
 # ======================================================
-# AUTH helpers
+# AUTH (Supabase email/password + signup + magic link)
 # ======================================================
 def _store_session(session) -> None:
+    """Išsaugom access/refresh tokenus, kad po rerun galėtume atstatyti sesiją."""
     if session is None:
         st.session_state.pop("sb_session", None)
         return
@@ -42,11 +35,8 @@ def _store_session(session) -> None:
         "refresh_token": session.refresh_token,
     }
 
-def _get_access_token():
-    s = st.session_state.get("sb_session")
-    return s.get("access_token") if s else None
-
 def _restore_session() -> bool:
+    """Atstatom sesiją į supabase klientą iš session_state."""
     s = st.session_state.get("sb_session")
     if not s:
         return False
@@ -69,7 +59,7 @@ def login(email: str, password: str) -> tuple[bool, str]:
 def signup(email: str, password: str) -> tuple[bool, str]:
     try:
         res = supabase.auth.sign_up({"email": email, "password": password})
-        # jei confirm email OFF, kartais gaunasi session iškart
+        # dažnai session nebūna, jei Confirm email ON — čia normalu
         try:
             if getattr(res, "session", None) is not None:
                 _store_session(res.session)
@@ -81,6 +71,7 @@ def signup(email: str, password: str) -> tuple[bool, str]:
 
 def send_magic_link(email: str) -> tuple[bool, str]:
     try:
+        # shouldCreateUser=True — leis sukurti vartotoją, jei jo dar nėra
         supabase.auth.sign_in_with_otp({"email": email, "shouldCreateUser": True})
         return True, ""
     except Exception as e:
@@ -94,12 +85,10 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-
-# ======================================================
-# Restore session if possible + mark authenticated
-# ======================================================
+# 1) pabandom atstatyti sesiją po rerun
 _restore_session()
 
+# 2) jei vartotojas jau validus — pažymim authenticated
 if "authenticated" not in st.session_state:
     try:
         u = supabase.auth.get_user()
@@ -109,10 +98,7 @@ if "authenticated" not in st.session_state:
     except Exception:
         pass
 
-
-# ======================================================
-# LOGIN UI
-# ======================================================
+# 3) jei neprisijungęs — rodome login/signup UI
 if "authenticated" not in st.session_state:
     st.title("🔐 Prisijungimas")
 
@@ -121,6 +107,7 @@ if "authenticated" not in st.session_state:
     with tabs[0]:
         email = st.text_input("El. paštas", key="login_email")
         password = st.text_input("Slaptažodis", type="password", key="login_pwd")
+
         c1, c2 = st.columns(2)
 
         if c1.button("Prisijungti"):
@@ -137,6 +124,7 @@ if "authenticated" not in st.session_state:
             ok, err = signup(email.strip(), password)
             if ok:
                 st.success("✅ Paskyra sukurta. Jei įjungtas Confirm email — patvirtink laiške prieš pirmą prisijungimą.")
+                st.info("Jei laiškas neateina (ypač KTU/įmonių paštai), pabandyk 'Magic link' arba testui laikinai išjunk Confirm email.")
             else:
                 st.error("❌ Nepavyko sukurti paskyros.")
                 st.caption(f"Techninė klaida: {err}")
@@ -153,45 +141,10 @@ if "authenticated" not in st.session_state:
 
     st.stop()
 
-
-# ======================================================
-# Sidebar + Delete account
-# ======================================================
 USER_EMAIL = st.session_state["email"]
 st.sidebar.success(f"👤 {USER_EMAIL}")
-
 if st.sidebar.button("🚪 Atsijungti"):
     logout()
-
-with st.sidebar.expander("⚠️ Paskyros ištrynimas"):
-    st.write("Šis veiksmas ištrins paskyrą ir VISUS tavo duomenis duomenų bazėje. Atšaukti neįmanoma.")
-    typed = st.text_input("Įrašyk DELETE patvirtinimui", key="delete_confirm")
-
-    if st.button("🗑️ Ištrinti paskyrą", disabled=(typed != "DELETE")):
-        token = _get_access_token()
-        if not token:
-            st.error("Nėra aktyvios sesijos. Prisijunk iš naujo.")
-            st.stop()
-
-        if "<PROJECT_REF>" in FUNCTION_URL:
-            st.error("FUNCTION_URL dar neįrašytas. Įrašyk savo projekto ref į URL.")
-            st.stop()
-
-        r = requests.post(
-            FUNCTION_URL,
-            headers={"Authorization": f"Bearer {token}"},
-            json={"confirm": "DELETE"},
-            timeout=30,
-        )
-
-        if r.status_code == 200:
-            st.success("Paskyra ištrinta. Viso gero 👋")
-            st.session_state.clear()
-            st.rerun()
-        else:
-            st.error(f"Nepavyko ištrinti ({r.status_code}).")
-            st.code(r.text)
-
 
 # ======================================================
 # HELPERS
@@ -201,7 +154,6 @@ def money(x: float) -> str:
         return f"{float(x):,.2f} {CURRENCY}".replace(",", " ")
     except Exception:
         return f"0.00 {CURRENCY}"
-
 
 # ======================================================
 # DATA
@@ -221,14 +173,17 @@ def fetch_user_data(email: str) -> pd.DataFrame:
     if df.empty:
         return df
 
+    # stabilūs tipai
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
     df = df.dropna(subset=["data"])
     df["suma_eur"] = pd.to_numeric(df["suma_eur"], errors="coerce").fillna(0.0)
 
+    # tekstai
     for col in ["kategorija", "prekybos_centras", "aprasymas", "tipas"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str)
 
+    # periodai
     df["year"] = df["data"].dt.year
     df["month"] = df["data"].dt.to_period("M").astype(str)
     return df
@@ -263,9 +218,8 @@ def update_row(row_id, d, tipas, kategorija, prekyba, aprasymas, suma):
     st.cache_data.clear()
     st.rerun()
 
-
 # ======================================================
-# UI
+# UI: Header + entry
 # ======================================================
 st.title("💶 Asmeninis biudžetas")
 
@@ -290,7 +244,6 @@ with st.expander("➕ Naujas įrašas", expanded=True):
         if st.form_submit_button("💾 Išsaugoti"):
             insert_row(d, tipas, kategorija, prekyba, aprasymas, suma)
 
-
 # ======================================================
 # LOAD
 # ======================================================
@@ -298,7 +251,6 @@ df = fetch_user_data(USER_EMAIL)
 if df.empty:
     st.info("Kol kas nėra įrašų. Įvesk pirmą operaciją ir viskas pradės „gyventi“.")
     st.stop()
-
 
 # ======================================================
 # FILTERS
@@ -328,7 +280,6 @@ if type_filter != "Visi":
 if cat_filter.strip():
     df_f = df_f[df_f["kategorija"].str.contains(cat_filter.strip(), case=False, na=False)]
 
-
 # ======================================================
 # KPI
 # ======================================================
@@ -347,6 +298,99 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
+# ======================================================
+# SMART INSIGHTS (NO AI)
+# ======================================================
+st.subheader("🔍 Smart insight: kur bėga pinigai (be DI)")
+
+with st.expander("⚙️ Insight nustatymai", expanded=False):
+    small_cap = st.slider("„Smulkios išlaidos“ riba (€)", 1, 50, 10, 1)
+    spike_pct = st.slider("„Šuolio“ riba vs praeitas mėnuo (%)", 5, 80, 20, 5)
+    lookback_months = st.slider("Vidurkio laikotarpis (mėn.)", 2, 12, 6, 1)
+
+current_month = month_filter if month_filter != "Visi" else sorted(df["month"].unique().tolist())[-1]
+
+cur = df[df["month"] == current_month].copy()
+cur_exp = cur[cur["tipas"] == "Išlaidos"].copy()
+cur_inc = cur[cur["tipas"] == "Pajamos"].copy()
+
+cur_period = pd.Period(current_month, freq="M")
+prev_month = str(cur_period - 1)
+prev = df[df["month"] == prev_month].copy()
+prev_exp = prev[prev["tipas"] == "Išlaidos"].copy()
+
+insights = []
+
+if not cur_exp.empty:
+    top_cat = (
+        cur_exp.groupby("kategorija")["suma_eur"].sum()
+        .sort_values(ascending=False)
+        .head(5)
+    )
+    top_cat_str = ", ".join([f"{k}: {money(v)}" for k, v in top_cat.items()])
+    insights.append(f"**Top kategorijos ({current_month})**: {top_cat_str}")
+
+if not cur_exp.empty:
+    small = cur_exp[cur_exp["suma_eur"] <= float(small_cap)]
+    if not small.empty:
+        insights.append(
+            f"**Smulkios išlaidos (≤ {small_cap} €)**: {int(len(small))} kartų, suma **{money(small['suma_eur'].sum())}**."
+        )
+
+if (not cur_exp.empty) and (not prev_exp.empty):
+    cur_cat = cur_exp.groupby("kategorija")["suma_eur"].sum()
+    prev_cat = prev_exp.groupby("kategorija")["suma_eur"].sum()
+    joined = pd.concat([cur_cat, prev_cat], axis=1)
+    joined.columns = ["cur", "prev"]
+    joined = joined.fillna(0.0)
+
+    joined2 = joined[joined["prev"] > 0].copy()
+    if not joined2.empty:
+        joined2["pct"] = (joined2["cur"] - joined2["prev"]) / joined2["prev"]
+        spikes = joined2[joined2["pct"] >= (spike_pct / 100.0)].sort_values("pct", ascending=False).head(5)
+        if not spikes.empty:
+            parts = []
+            for k, row in spikes.iterrows():
+                parts.append(f"{k}: {money(row['cur'])} (buvo {money(row['prev'])}, +{row['pct']*100:.0f}%)")
+            insights.append(f"**Šuoliai vs {prev_month}**: " + "; ".join(parts))
+
+if not cur_exp.empty and "prekybos_centras" in cur_exp.columns:
+    cur_exp["prekybos_centras"] = cur_exp["prekybos_centras"].replace("", "Nežinoma")
+    by_merch = cur_exp.groupby("prekybos_centras").agg(cnt=("suma_eur", "size"), total=("suma_eur", "sum"))
+    repeat = by_merch[by_merch["cnt"] >= 3].sort_values("total", ascending=False).head(5)
+    if not repeat.empty:
+        parts = [f"{idx}: {int(r.cnt)} kart., {money(r.total)}" for idx, r in repeat.iterrows()]
+        insights.append("**Pasikartojančios vietos (3+ kartai)**: " + "; ".join(parts))
+
+cur_income = cur_inc["suma_eur"].sum()
+cur_expense = cur_exp["suma_eur"].sum()
+if cur_income > 0:
+    rate = (cur_income - cur_expense) / cur_income
+    if rate < 0:
+        insights.append(f"⚠️ **{current_month}**: išlaidos viršija pajamas (sutaupymo norma {rate*100:.1f}%).")
+    elif rate < 0.15:
+        insights.append(f"⚠️ **{current_month}**: sutaupymo norma žema ({rate*100:.1f}%). Tikslui pasiekti reikės mažinti TOP kategorijas.")
+    else:
+        insights.append(f"✅ **{current_month}**: sutaupymo norma {rate*100:.1f}% – kryptis gera.")
+
+all_months = sorted(df["month"].unique().tolist())
+cur_idx = all_months.index(current_month) if current_month in all_months else None
+if cur_idx is not None:
+    start_idx = max(0, cur_idx - lookback_months)
+    lookback_list = all_months[start_idx:cur_idx]
+    if lookback_list:
+        base = df[(df["month"].isin(lookback_list)) & (df["tipas"] == "Išlaidos")]["suma_eur"].sum() / len(lookback_list)
+        cur_total = df[(df["month"] == current_month) & (df["tipas"] == "Išlaidos")]["suma_eur"].sum()
+        if base > 0:
+            diff = (cur_total - base) / base
+            if diff >= (spike_pct / 100.0):
+                insights.append(f"⚠️ **Bendrai išlaidos** {current_month}: {money(cur_total)}. Tai ~{diff*100:.0f}% daugiau nei tavo {len(lookback_list)} mėn. vidurkis ({money(base)}).")
+
+if insights:
+    for s in insights:
+        st.markdown(f"- {s}")
+else:
+    st.info("Dar per mažai duomenų insightams. Įvesk daugiau įrašų arba pasirink konkretų mėnesį.")
 
 # ======================================================
 # TABLE: edit + delete
@@ -385,7 +429,6 @@ else:
                 if st.button("🗑️ Ištrinti įrašą", key=f"del_{r['id']}"):
                     delete_row(r["id"])
 
-
 # ======================================================
 # CHARTS
 # ======================================================
@@ -398,6 +441,30 @@ df_all["balansas"] = df_all["signed"].cumsum()
 fig_bal = px.line(df_all, x="data", y="balansas", title="Kaupiamasis balansas (visa istorija)")
 st.plotly_chart(fig_bal, use_container_width=True)
 
+if not df_f.empty:
+    tmp = df_f.copy()
+    tmp["ym"] = tmp["data"].dt.to_period("M").astype(str)
+    monthly = tmp.groupby(["ym", "tipas"])["suma_eur"].sum().reset_index()
+
+    fig_bar = px.bar(
+        monthly,
+        x="ym",
+        y="suma_eur",
+        color="tipas",
+        barmode="group",
+        title="Pajamos vs Išlaidos (pagal filtrą)"
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
+if not exp_f.empty:
+    cat_sum = exp_f.groupby("kategorija")["suma_eur"].sum().sort_values(ascending=False).reset_index()
+    fig_pie = px.pie(cat_sum, names="kategorija", values="suma_eur", hole=0.45,
+                     title="Išlaidos pagal kategorijas (sumos + %)")
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("**Išlaidos pagal kategorijas (sumos):**")
+    st.dataframe(cat_sum, use_container_width=True, hide_index=True)
 
 # ======================================================
 # EXPORT
@@ -415,5 +482,3 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
-
