@@ -299,7 +299,7 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# KPI: kiek dienų užtenka balanso + iki kurios datos (pagal filtrus)
+# KPI: balanso pakaks (dienomis + iki kurios datos) — reaguoja į filtrus
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
 days_available = None
 avg_daily_expense = None
@@ -317,16 +317,15 @@ if days_available is not None and end_date is not None:
     k5.metric(
         "Balanso pakaks",
         f"{days_available:.0f} d.",
-        help=(
-            f"Prognozė iki datos: {end_date.isoformat()} "
-            f"(pagal filtrą: balansas / vid. dienos išlaidos; vid. dienos išlaidos: {money(avg_daily_expense)})."
-        )
+        delta=f"iki {end_date.isoformat()}",
+        delta_color="off"
     )
 else:
     k5.metric(
         "Balanso pakaks",
         "—",
-        help="Reikia teigiamo balanso ir bent vienos dienos su išlaidomis pasirinktame filtre."
+        delta="nėra pakankamai duomenų",
+        delta_color="off"
     )
 
 # ======================================================
