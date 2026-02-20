@@ -300,15 +300,18 @@ if income > 0:
     savings_rate = (income - expense) / income
 k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# 5–6 finansinė pagalvė ir vid. dienos išlaidos (pagal filtrus, per visas laikotarpio dienas)
+# 5–6 finansinė pagalvė ir vid. dienos išlaidos
+# Reikalavimai:
+# - jei pasirinktas mėnuo: skaičiuoti nuo 1 mėn. dienos iki paskutinio įrašo tame mėnesyje
+# - jei pasirinkti tik metai (mėnuo "Visi"): skaičiuoti per visas metų dienas (365/366)
+# - jei "Visi"+"Visi": nuo min(data) iki max(data)
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
 
 days_available = None
 avg_daily_expense = None
 end_date = None
 
-# Laikotarpį dienoms skaičiuoti imame tik iš laiko filtrų (metai/mėnuo),
-# ne iš tipo/kategorijos, kad laikotarpis nesusitrauktų.
+# laikui (dienų skaičiavimui) imame tik metai/mėnuo filtrus
 df_time = df.copy()
 if year_filter != "Visi":
     df_time = df_time[df_time["year"] == year_filter]
@@ -316,28 +319,34 @@ if month_filter != "Visi":
     df_time = df_time[df_time["month"] == month_filter]
 
 calendar_days = None
+min_day = None
+max_day = None
 
 if month_filter != "Visi":
-    # pilnas pasirinkto mėnesio kalendorius (1..paskutinė mėn. diena)
+    # mėnuo: nuo 1 d. iki paskutinio įrašo šiame mėnesyje
     p = pd.Period(month_filter, freq="M")
     min_day = p.start_time.date()
-    max_day = p.end_time.date()
+    if not df_time.empty:
+        max_day = df_time["data"].max().date()
+    else:
+        max_day = min_day
     calendar_days = (max_day - min_day).days + 1
 
 elif year_filter != "Visi":
-    # pilni pasirinkti metai (01-01 .. 12-31)
-    min_day = date(int(year_filter), 1, 1)
-    max_day = date(int(year_filter), 12, 31)
+    # metai: pilni metai (365/366)
+    y = int(year_filter)
+    min_day = date(y, 1, 1)
+    max_day = date(y, 12, 31)
     calendar_days = (max_day - min_day).days + 1
 
 else:
-    # visi duomenys: nuo seniausios iki naujausios datos (imtinai)
+    # visi duomenys: nuo min iki max
     if not df_time.empty:
         min_day = df_time["data"].min().date()
         max_day = df_time["data"].max().date()
         calendar_days = (max_day - min_day).days + 1
 
-# Vidurkis per VISAS kalendorines dienas laikotarpyje
+# Vidurkis per visas kalendorines dienas apsibrėžtame laikotarpyje
 if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty):
     avg_daily_expense = exp_daily["suma_eur"].sum() / calendar_days
 
@@ -345,7 +354,7 @@ if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty)
         days_available = balance / avg_daily_expense
         end_date = date.today() + timedelta(days=int(days_available))
 
-# Finansinė pagalvė (dienos + data + €/d)
+# Finansinė pagalvė
 if days_available is not None and end_date is not None:
     k5.metric(
         "Finansinė pagalvė",
@@ -361,7 +370,7 @@ else:
         delta_color="off"
     )
 
-# Vidutinės dienos išlaidos (matomas skaičius trendui)
+# Vidutinės dienos išlaidos
 if avg_daily_expense is not None:
     k6.metric("Vid. dienos išlaidos", money(avg_daily_expense))
 else:
