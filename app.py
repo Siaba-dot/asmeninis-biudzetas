@@ -526,11 +526,16 @@ else:
 # ======================================================
 st.subheader("📈 Analitika")
 
+# --- FIX: kaupiamąjį balansą skaičiuojame per DIENOS net pokytį,
+# kad nebūtų "spyglių" ir klaidinančių šuolių, kai vieną dieną yra keli įrašai.
 df_all = df.sort_values("data").copy()
 df_all["signed"] = df_all["suma_eur"].where(df_all["tipas"] == "Pajamos", -df_all["suma_eur"])
-df_all["balansas"] = df_all["signed"].cumsum()
 
-fig_bal = px.line(df_all, x="data", y="balansas", title="Kaupiamasis balansas (visa istorija)")
+daily = df_all.groupby("data", as_index=False)["signed"].sum()
+daily = daily.sort_values("data")
+daily["balansas"] = daily["signed"].cumsum()
+
+fig_bal = px.line(daily, x="data", y="balansas", title="Kaupiamasis balansas (visa istorija)")
 st.plotly_chart(fig_bal, use_container_width=True)
 
 if not df_f.empty:
@@ -579,3 +584,4 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+  
