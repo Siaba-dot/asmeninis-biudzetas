@@ -540,8 +540,19 @@ st.plotly_chart(fig_bal, use_container_width=True)
 
 if not df_f.empty:
     tmp = df_f.copy()
+
+    # PATAISYMAS:
+    # 1) atskiras laukas rikiavimui
+    # 2) atskiras tekstinis laukas rodymui
+    # 3) x ašis priverstinai category, kad Plotly neinterpretuotų kaip datos
+    tmp["ym_sort"] = tmp["data"].dt.to_period("M").dt.to_timestamp()
     tmp["ym"] = tmp["data"].dt.to_period("M").astype(str)
-    monthly = tmp.groupby(["ym", "tipas"])["suma_eur"].sum().reset_index()
+
+    monthly = (
+        tmp.groupby(["ym_sort", "ym", "tipas"], as_index=False)["suma_eur"]
+        .sum()
+        .sort_values("ym_sort")
+    )
 
     fig_bar = px.bar(
         monthly,
@@ -551,6 +562,8 @@ if not df_f.empty:
         barmode="group",
         title="Pajamos vs Išlaidos (pagal filtrą)"
     )
+    fig_bar.update_xaxes(type="category")
+
     st.plotly_chart(fig_bar, use_container_width=True)
 
 exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
@@ -584,4 +597,3 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-  
