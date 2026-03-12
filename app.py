@@ -9,7 +9,20 @@ import io
 st.set_page_config(page_title="💶 Asmeninis biudžetas", layout="wide")
 
 # ======================================================
-# Supabase
+# KONFIGŪRACIJA
+# ======================================================
+TABLE = "biudzetas"
+CURRENCY = "€"
+
+# Tikros asmeninės pajamos KPI / pagalvei / prediction
+PERSONAL_INCOME_CATEGORIES = ["Alga", "Avansas", "Priedas"]
+
+# Namų ūkio įnašas maistui – tai ne tavo realios pajamos,
+# o maisto išlaidų kompensacija
+FOOD_SUPPORT_CATEGORY = "Papildomos pajamos maistui"
+
+# ======================================================
+# SUPABASE
 # ======================================================
 @st.cache_resource(show_spinner=False)
 def get_supabase() -> Client:
@@ -19,11 +32,9 @@ def get_supabase() -> Client:
     )
 
 supabase = get_supabase()
-TABLE = "biudzetas"
-CURRENCY = "€"
 
 # ======================================================
-# AUTH (Supabase email/password + signup + magic link)
+# AUTH
 # ======================================================
 def _store_session(session) -> None:
     if session is None:
@@ -116,7 +127,7 @@ if "authenticated" not in st.session_state:
         if c2.button("Sukurti paskyrą"):
             ok, err = signup(email.strip(), password)
             if ok:
-                st.success("✅ Paskyra sukurta. Jei įjungtas Confirm email — patvirtink laiške prieš pirmą prisijungimą.")
+                st.success("✅ Paskyra sukurta. Jei įjungtas Confirm email – patvirtink laiške prieš pirmą prisijungimą.")
                 st.info("Jei laiškas neateina, pabandyk 'Magic link' arba testui laikinai išjunk Confirm email.")
             else:
                 st.error("❌ Nepavyko sukurti paskyros.")
@@ -140,7 +151,7 @@ if st.sidebar.button("🚪 Atsijungti"):
     logout()
 
 # ======================================================
-# HELPERS
+# PAGALBINĖS FUNKCIJOS
 # ======================================================
 def money(x: float) -> str:
     try:
@@ -157,8 +168,44 @@ def safe_float(x, default=0.0) -> float:
 def add_month_start(dt: pd.Timestamp, n: int) -> pd.Timestamp:
     return (pd.Timestamp(dt).to_period("M") + n).to_timestamp()
 
+def cat_norm(series: pd.Series) -> pd.Series:
+    return series.fillna("").replace("", "Nežinoma").astype(str).str.strip()
+
+def personal_income_mask(df_in: pd.DataFrame) -> pd.Series:
+    return (
+        (df_in["tipas"] == "Pajamos") &
+        (cat_norm(df_in["kategorija"]).isin(PERSONAL_INCOME_CATEGORIES))
+    )
+
+def food_support_mask(df_in: pd.DataFrame) -> pd.Series:
+    return (
+        (df_in["tipas"] == "Pajamos") &
+        (cat_norm(df_in["kategorija"]) == FOOD_SUPPORT_CATEGORY)
+    )
+
+def personal_metrics(df_in: pd.DataFrame):
+    """
+    Grąžina:
+    - personal_income
+    - food_support
+    - total_expense
+    - personal_expense (išlaidos minus maisto kompensacija)
+    - personal_balance
+    """
+    if df_in.empty:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    personal_income = df_in.loc[personal_income_mask(df_in), "suma_eur"].sum()
+    food_support = df_in.loc[food_support_mask(df_in), "suma_eur"].sum()
+    total_expense = df_in.loc[df_in["tipas"] == "Išlaidos", "suma_eur"].sum()
+
+    personal_expense = max(total_expense - food_support, 0.0)
+    personal_balance = personal_income - personal_expense
+
+    return personal_income, food_support, total_expense, personal_expense, personal_balance
+
 # ======================================================
-# KPI UI
+# KPI STILIUS
 # ======================================================
 def render_kpi_card(title: str, value: str, subtitle: str = "", tone: str = "neutral"):
     st.markdown(
@@ -233,10 +280,6 @@ st.markdown(
         border: 1px solid rgba(251,191,36,0.25);
     }
 
-    div[data-testid="stHorizontalBlock"] > div:has(.kpi-card) {
-        padding-top: 2px;
-    }
-
     .scenario-box {
         border-radius: 18px;
         padding: 14px 16px;
@@ -250,7 +293,7 @@ st.markdown(
 )
 
 # ======================================================
-# DATA
+# DUOMENYS
 # ======================================================
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_user_data(email: str) -> pd.DataFrame:
@@ -263,22 +306,22 @@ def fetch_user_data(email: str) -> pd.DataFrame:
         .data
         or []
     )
-    df = pd.DataFrame(data)
-    if df.empty:
-        return df
+    df_local = pd.DataFrame(data)
+    if df_local.empty:
+        return df_local
 
-    df["data"] = pd.to_datetime(df["data"], errors="coerce")
-    df = df.dropna(subset=["data"])
-    df["suma_eur"] = pd.to_numeric(df["suma_eur"], errors="coerce").fillna(0.0)
+    df_local["data"] = pd.to_datetime(df_local["data"], errors="coerce")
+    df_local = df_local.dropna(subset=["data"])
+    df_local["suma_eur"] = pd.to_numeric(df_local["suma_eur"], errors="coerce").fillna(0.0)
 
     for col in ["kategorija", "prekybos_centras", "aprasymas", "tipas"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str)
+        if col in df_local.columns:
+            df_local[col] = df_local[col].fillna("").astype(str)
 
-    df["year"] = df["data"].dt.year
-    df["month"] = df["data"].dt.to_period("M").astype(str)
-    df["month_ts"] = df["data"].dt.to_period("M").dt.to_timestamp()
-    return df
+    df_local["year"] = df_local["data"].dt.year
+    df_local["month"] = df_local["data"].dt.to_period("M").astype(str)
+    df_local["month_ts"] = df_local["data"].dt.to_period("M").dt.to_timestamp()
+    return df_local
 
 def insert_row(d, tipas, kategorija, prekyba, aprasymas, suma):
     supabase.table(TABLE).insert({
@@ -311,7 +354,7 @@ def update_row(row_id, d, tipas, kategorija, prekyba, aprasymas, suma):
     st.rerun()
 
 # ======================================================
-# UI: Header + entry
+# HEADER + NAUJAS ĮRAŠAS
 # ======================================================
 st.title("💶 Asmeninis biudžetas")
 
@@ -337,7 +380,7 @@ with st.expander("➕ Naujas įrašas", expanded=True):
             insert_row(d, tipas, kategorija, prekyba, aprasymas, suma)
 
 # ======================================================
-# LOAD
+# UŽKROVIMAS
 # ======================================================
 df = fetch_user_data(USER_EMAIL)
 if df.empty:
@@ -345,7 +388,7 @@ if df.empty:
     st.stop()
 
 # ======================================================
-# FILTERS
+# FILTRAI
 # ======================================================
 st.subheader("🔎 Filtrai")
 
@@ -370,68 +413,52 @@ if month_filter != "Visi":
 if type_filter != "Visi":
     df_f = df_f[df_f["tipas"] == type_filter]
 if cat_filter.strip():
-    df_f = df_f[df_f["kategorija"].str.contains(cat_filter.strip(), case=False, na=False)]
+    df_f = df_f[cat_norm(df_f["kategorija"]).str.contains(cat_filter.strip(), case=False, na=False)]
 
 # ======================================================
-# KPI
+# KPI – ASMENINĖ LOGIKA
 # ======================================================
-income = df_f[df_f["tipas"] == "Pajamos"]["suma_eur"].sum()
-expense = df_f[df_f["tipas"] == "Išlaidos"]["suma_eur"].sum()
-balance = income - expense
-
 st.subheader("📊 KPI")
 
+personal_income, food_support, total_expense, personal_expense, personal_balance = personal_metrics(df_f)
+
+# Asmeninė sutaupymo norma
 savings_rate = None
-if income > 0:
-    savings_rate = (income - expense) / income
+if personal_income > 0:
+    savings_rate = personal_balance / personal_income
 
-exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
-
-days_available = None
-avg_daily_expense = None
-end_date = None
-
-df_time = df.copy()
-if year_filter != "Visi":
-    df_time = df_time[df_time["year"] == year_filter]
-if month_filter != "Visi":
-    df_time = df_time[df_time["month"] == month_filter]
+# Finansinė pagalvė turi remtis TIKROSIOMIS tavo išlaidomis
+exp_daily_source = df_f.copy()
 
 calendar_days = None
-min_day = None
-max_day = None
-
 if month_filter != "Visi":
     p = pd.Period(month_filter, freq="M")
     min_day = p.start_time.date()
-    if not df_time.empty:
-        max_day = df_time["data"].max().date()
-    else:
-        max_day = min_day
+    max_day = exp_daily_source["data"].max().date() if not exp_daily_source.empty else min_day
     calendar_days = (max_day - min_day).days + 1
-
 elif year_filter != "Visi":
     y = int(year_filter)
     min_day = date(y, 1, 1)
     max_day = date(y, 12, 31)
     calendar_days = (max_day - min_day).days + 1
-
 else:
-    if not df_time.empty:
-        min_day = df_time["data"].min().date()
-        max_day = df_time["data"].max().date()
-        calendar_days = (max_day - min_day).days + 1
+    min_day = exp_daily_source["data"].min().date() if not exp_daily_source.empty else date.today()
+    max_day = exp_daily_source["data"].max().date() if not exp_daily_source.empty else date.today()
+    calendar_days = (max_day - min_day).days + 1
 
-if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty):
-    avg_daily_expense = exp_daily["suma_eur"].sum() / calendar_days
+avg_daily_personal_expense = None
+days_available = None
+end_date = None
 
-    if avg_daily_expense > 0 and balance > 0:
-        days_available = balance / avg_daily_expense
+if calendar_days and calendar_days > 0:
+    avg_daily_personal_expense = personal_expense / calendar_days
+    if avg_daily_personal_expense > 0 and personal_balance > 0:
+        days_available = personal_balance / avg_daily_personal_expense
         end_date = date.today() + timedelta(days=int(days_available))
 
-income_tone = "positive" if income > 0 else "neutral"
-expense_tone = "negative" if expense > 0 else "neutral"
-balance_tone = "positive" if balance > 0 else ("negative" if balance < 0 else "neutral")
+income_tone = "positive" if personal_income > 0 else "neutral"
+expense_tone = "negative" if personal_expense > 0 else "neutral"
+balance_tone = "positive" if personal_balance > 0 else ("negative" if personal_balance < 0 else "neutral")
 
 if savings_rate is None:
     savings_tone = "neutral"
@@ -444,18 +471,33 @@ else:
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    render_kpi_card("💰 Pajamos", money(income), "Visos pajamos pagal pasirinktą filtrą", income_tone)
+    render_kpi_card(
+        "💰 Tikros pajamos",
+        money(personal_income),
+        "Skaičiuojama tik iš: Alga, Avansas, Priedas",
+        income_tone
+    )
 with c2:
-    render_kpi_card("💸 Išlaidos", money(expense), "Visos išlaidos pagal pasirinktą filtrą", expense_tone)
+    render_kpi_card(
+        "💸 Tikros išlaidos",
+        money(personal_expense),
+        f"Visos išlaidos minus maisto kompensacija ({money(food_support)})",
+        expense_tone
+    )
 with c3:
-    render_kpi_card("📈 Balansas", money(balance), "Pajamos minus išlaidos", balance_tone)
+    render_kpi_card(
+        "📈 Asmeninis balansas",
+        money(personal_balance),
+        "Tikros pajamos minus tikros išlaidos",
+        balance_tone
+    )
 
 c4, c5, c6 = st.columns(3)
 with c4:
     render_kpi_card(
         "🎯 Sutaupymo norma",
         f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—",
-        "Kiek pajamų lieka po išlaidų",
+        "Skaičiuojama pagal asmenines pajamas ir asmenines išlaidas",
         savings_tone
     )
 
@@ -464,7 +506,7 @@ with c5:
         render_kpi_card(
             "🛟 Finansinė pagalvė",
             f"{days_available:.0f} d.",
-            f"iki {end_date.isoformat()} • ~{money(avg_daily_expense)}/d.",
+            f"iki {end_date.isoformat()} • ~{money(avg_daily_personal_expense)}/d.",
             "positive" if days_available >= 30 else "warning"
         )
     else:
@@ -478,13 +520,13 @@ with c5:
 with c6:
     render_kpi_card(
         "📅 Vid. dienos išlaidos",
-        money(avg_daily_expense) if avg_daily_expense is not None else "—",
-        "Skaičiuojama pagal pasirinktą laikotarpį",
-        "warning" if avg_daily_expense is not None else "neutral"
+        money(avg_daily_personal_expense) if avg_daily_personal_expense is not None else "—",
+        "Skaičiuojama pagal tikras tavo išlaidas",
+        "warning" if avg_daily_personal_expense is not None else "neutral"
     )
 
 # ======================================================
-# SMART INSIGHTS (NO AI)
+# SMART INSIGHTS
 # ======================================================
 st.subheader("🔍 Smart insight: kur bėga pinigai (be DI)")
 
@@ -508,7 +550,7 @@ insights = []
 
 if not cur_exp.empty:
     top_cat = (
-        cur_exp.groupby("kategorija")["suma_eur"].sum()
+        cur_exp.groupby(cat_norm(cur_exp["kategorija"]))["suma_eur"].sum()
         .sort_values(ascending=False)
         .head(5)
     )
@@ -523,9 +565,9 @@ if not cur_exp.empty:
         )
 
 if (not cur_exp.empty) and (not prev_exp.empty):
-    cur_cat = cur_exp.groupby("kategorija")["suma_eur"].sum()
-    prev_cat = prev_exp.groupby("kategorija")["suma_eur"].sum()
-    joined = pd.concat([cur_cat, prev_cat], axis=1)
+    cur_group = cur_exp.assign(kat=cat_norm(cur_exp["kategorija"])).groupby("kat")["suma_eur"].sum()
+    prev_group = prev_exp.assign(kat=cat_norm(prev_exp["kategorija"])).groupby("kat")["suma_eur"].sum()
+    joined = pd.concat([cur_group, prev_group], axis=1)
     joined.columns = ["cur", "prev"]
     joined = joined.fillna(0.0)
 
@@ -547,10 +589,11 @@ if not cur_exp.empty and "prekybos_centras" in cur_exp.columns:
         parts = [f"{idx}: {int(r.cnt)} kart., {money(r.total)}" for idx, r in repeat.iterrows()]
         insights.append("**Pasikartojančios vietos (3+ kartai)**: " + "; ".join(parts))
 
-cur_income = cur_inc["suma_eur"].sum()
-cur_expense = cur_exp["suma_eur"].sum()
-if cur_income > 0:
-    rate = (cur_income - cur_expense) / cur_income
+# Insight sutaupymo norma irgi pagal asmeninę logiką
+cur_personal_income, cur_food_support, cur_total_expense, cur_personal_expense, cur_personal_balance = personal_metrics(cur)
+
+if cur_personal_income > 0:
+    rate = cur_personal_balance / cur_personal_income
     if rate < 0:
         insights.append(f"⚠️ **{current_month}**: išlaidos viršija pajamas (sutaupymo norma {rate*100:.1f}%).")
     elif rate < 0.15:
@@ -564,14 +607,19 @@ if cur_idx is not None:
     start_idx = max(0, cur_idx - lookback_months)
     lookback_list = all_months[start_idx:cur_idx]
     if lookback_list:
-        base = df[(df["month"].isin(lookback_list)) & (df["tipas"] == "Išlaidos")]["suma_eur"].sum() / len(lookback_list)
-        cur_total = df[(df["month"] == current_month) & (df["tipas"] == "Išlaidos")]["suma_eur"].sum()
-        if base > 0:
-            diff = (cur_total - base) / base
+        base_exp = 0.0
+        for m in lookback_list:
+            m_df = df[df["month"] == m].copy()
+            _, _, _, m_personal_expense, _ = personal_metrics(m_df)
+            base_exp += m_personal_expense
+        base_exp = base_exp / len(lookback_list)
+
+        if base_exp > 0:
+            diff = (cur_personal_expense - base_exp) / base_exp
             if diff >= (spike_pct / 100.0):
                 insights.append(
-                    f"⚠️ **Bendrai išlaidos** {current_month}: {money(cur_total)}. "
-                    f"Tai ~{diff*100:.0f}% daugiau nei tavo {len(lookback_list)} mėn. vidurkis ({money(base)})."
+                    f"⚠️ **Bendrai tikros išlaidos** {current_month}: {money(cur_personal_expense)}. "
+                    f"Tai ~{diff*100:.0f}% daugiau nei tavo {len(lookback_list)} mėn. vidurkis ({money(base_exp)})."
                 )
 
 if insights:
@@ -581,7 +629,7 @@ else:
     st.info("Dar per mažai duomenų insightams.")
 
 # ======================================================
-# TABLE: edit + delete
+# ĮRAŠAI
 # ======================================================
 st.subheader("📋 Įrašai (redagavimas / trynimas)")
 
@@ -628,7 +676,7 @@ else:
                         delete_row(r["id"])
 
 # ======================================================
-# CHARTS
+# GRAFIKAI
 # ======================================================
 st.subheader("📈 Analitika")
 
@@ -666,7 +714,12 @@ if not df_f.empty:
 
 exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
 if not exp_f.empty:
-    cat_sum = exp_f.groupby("kategorija", as_index=False)["suma_eur"].sum().sort_values("suma_eur", ascending=True)
+    cat_sum = (
+        exp_f.assign(kategorija=cat_norm(exp_f["kategorija"]))
+        .groupby("kategorija", as_index=False)["suma_eur"]
+        .sum()
+        .sort_values("suma_eur", ascending=True)
+    )
 
     fig_cat = px.bar(
         cat_sum,
@@ -679,30 +732,16 @@ if not exp_f.empty:
     st.dataframe(cat_sum.sort_values("suma_eur", ascending=False), use_container_width=True, hide_index=True)
 
 # ======================================================
-# PREDICTION / WHAT-IF SCENARIO
+# PREDICTION / WHAT-IF – ASMENINĖ LOGIKA
 # ======================================================
 st.subheader("🔮 Ateities scenarijus / Prediction")
 
-# Mėnesinis pagrindas
-monthly_all = (
-    df.groupby(["month_ts", "month", "tipas"], as_index=False)["suma_eur"]
-    .sum()
-    .sort_values("month_ts")
+month_base = (
+    df.groupby(["month_ts", "month"], as_index=False)
+      .agg(dummy=("suma_eur", "size"))
+      .sort_values("month_ts")
+      .reset_index(drop=True)
 )
-
-income_monthly = (
-    monthly_all[monthly_all["tipas"] == "Pajamos"][["month_ts", "month", "suma_eur"]]
-    .rename(columns={"suma_eur": "income"})
-)
-
-expense_monthly = (
-    monthly_all[monthly_all["tipas"] == "Išlaidos"][["month_ts", "month", "suma_eur"]]
-    .rename(columns={"suma_eur": "expense"})
-)
-
-month_base = pd.merge(income_monthly, expense_monthly, on=["month_ts", "month"], how="outer").fillna(0.0)
-month_base["net"] = month_base["income"] - month_base["expense"]
-month_base = month_base.sort_values("month_ts").reset_index(drop=True)
 
 if month_base.empty:
     st.info("Prediction blokui kol kas per mažai duomenų.")
@@ -710,29 +749,44 @@ else:
     with st.expander("⚙️ Scenarijaus nustatymai", expanded=True):
         c1, c2, c3 = st.columns(3)
         with c1:
-            scenario_lookback = st.slider("Bazės laikotarpis (mėn.)", 1, min(12, max(1, len(month_base))), min(6, len(month_base)))
+            scenario_lookback = st.slider(
+                "Bazės laikotarpis (mėn.)",
+                1,
+                min(12, max(1, len(month_base))),
+                min(6, len(month_base))
+            )
         with c2:
             scenario_horizon = st.slider("Prognozės horizontas (mėn.)", 3, 60, 12, 1)
         with c3:
-            one_time_boost = st.number_input("Vienkartinė suma pradžioje (€)", min_value=0.0, value=0.0, step=100.0, format="%.2f")
+            one_time_boost = st.number_input(
+                "Vienkartinė suma pradžioje (€)",
+                min_value=0.0,
+                value=0.0,
+                step=100.0,
+                format="%.2f"
+            )
 
-        recent = month_base.tail(scenario_lookback).copy()
+        recent_months = month_base.tail(scenario_lookback)["month"].tolist()
+        recent_df = df[df["month"].isin(recent_months)].copy()
 
-        base_income = safe_float(recent["income"].mean())
-        base_expense = safe_float(recent["expense"].mean())
+        base_personal_income, base_food_support_total, base_total_expense, base_personal_expense, base_monthly_net_total = personal_metrics(recent_df)
 
-        if base_income < 0:
-            base_income = 0.0
-        if base_expense < 0:
-            base_expense = 0.0
+        # Kadangi recent_df apima N mėnesių, reikia paversti į mėnesio vidurkius
+        base_personal_income = base_personal_income / max(1, scenario_lookback)
+        base_food_support = base_food_support_total / max(1, scenario_lookback)
+        base_total_expense = base_total_expense / max(1, scenario_lookback)
+        base_personal_expense = base_personal_expense / max(1, scenario_lookback)
+        base_monthly_net = base_personal_income - base_personal_expense
 
         st.markdown(
             f"""
             <div class="scenario-box">
-                <b>Bazinė prognozė skaičiuojama pagal paskutinių {scenario_lookback} mėn. vidurkį:</b><br>
-                Vid. mėnesio pajamos: <b>{money(base_income)}</b><br>
-                Vid. mėnesio išlaidos: <b>{money(base_expense)}</b><br>
-                Vid. mėnesio likutis: <b>{money(base_income - base_expense)}</b>
+                <b>Bazinė asmeninė prognozė pagal paskutinių {scenario_lookback} mėn. vidurkį:</b><br>
+                Tikros asmeninės pajamos: <b>{money(base_personal_income)}</b><br>
+                Maisto kompensacija iš namų ūkio: <b>{money(base_food_support)}</b><br>
+                Visos išlaidos: <b>{money(base_total_expense)}</b><br>
+                Grynos tavo išlaidos: <b>{money(base_personal_expense)}</b><br>
+                Vid. mėnesio likutis: <b>{money(base_monthly_net)}</b>
             </div>
             """,
             unsafe_allow_html=True
@@ -740,12 +794,24 @@ else:
 
         c4, c5 = st.columns(2)
         with c4:
-            monthly_income_change = st.number_input("Papildomos / mažesnės mėnesio pajamos (€)", value=0.0, step=50.0, format="%.2f")
+            monthly_income_change = st.number_input(
+                "Papildomos / mažesnės mėnesio pajamos (€)",
+                value=0.0,
+                step=50.0,
+                format="%.2f",
+                help="Čia rašyk tik tas pajamas, kurias realiai gausi kiekvieną mėnesį."
+            )
         with c5:
-            recurring_extra_saving = st.number_input("Papildomas taupymas kas mėn. (€)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
+            recurring_extra_saving = st.number_input(
+                "Papildomas taupymas kas mėn. (€)",
+                min_value=0.0,
+                value=0.0,
+                step=50.0,
+                format="%.2f"
+            )
 
         expense_categories = ["Jokių pakeitimų"] + sorted(
-            df[df["tipas"] == "Išlaidos"]["kategorija"].replace("", "Nežinoma").unique().tolist()
+            cat_norm(df[df["tipas"] == "Išlaidos"]["kategorija"]).unique().tolist()
         )
 
         c6, c7, c8 = st.columns([1.5, 1, 1.2])
@@ -754,31 +820,33 @@ else:
         with c7:
             reduce_pct = st.slider("Mažinimas (%)", 0, 100, 0, 5)
         with c8:
-            released_monthly_after = st.number_input("Papildoma laisva suma po X mėn. (€)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
+            released_monthly_after = st.number_input(
+                "Papildoma laisva suma po X mėn. (€)",
+                min_value=0.0,
+                value=0.0,
+                step=50.0,
+                format="%.2f"
+            )
 
         release_start_month = st.slider("Po kiek mėn. ta suma atsiras", 1, 60, 12, 1)
 
-    # Kategorijos bazė per paskutinius N mėn.
-    recent_month_labels = recent["month"].tolist()
-    cat_recent = df[(df["tipas"] == "Išlaidos") & (df["month"].isin(recent_month_labels))].copy()
+    # Kategorijos bazė
+    cat_recent = df[(df["tipas"] == "Išlaidos") & (df["month"].isin(recent_months))].copy()
     category_cut_monthly = 0.0
 
     if reduce_category != "Jokių pakeitimų" and not cat_recent.empty:
-        target_cat = reduce_category
-        cat_recent["kategorija"] = cat_recent["kategorija"].replace("", "Nežinoma")
-        cat_total = cat_recent[cat_recent["kategorija"] == target_cat]["suma_eur"].sum()
+        cat_recent["kategorija"] = cat_norm(cat_recent["kategorija"])
+        cat_total = cat_recent.loc[cat_recent["kategorija"] == reduce_category, "suma_eur"].sum()
         category_avg_monthly = cat_total / max(1, scenario_lookback)
         category_cut_monthly = category_avg_monthly * (reduce_pct / 100.0)
 
-    scenario_income = max(0.0, base_income + monthly_income_change)
-    scenario_expense = max(0.0, base_expense - category_cut_monthly)
-    scenario_net_before_extra = scenario_income - scenario_expense
-    scenario_net_after_extra = scenario_net_before_extra + recurring_extra_saving
+    scenario_income = max(0.0, base_personal_income + monthly_income_change)
+    scenario_expense = max(0.0, base_personal_expense - category_cut_monthly)
+    scenario_net_after_extra = scenario_income - scenario_expense + recurring_extra_saving
 
-    current_total_balance = float(
-        df["suma_eur"].where(df["tipas"] == "Pajamos", -df["suma_eur"]).sum()
-    )
-    scenario_start_balance = current_total_balance + one_time_boost
+    # Startinis balansas prediction turi būti tavo asmeninis balansas + vienkartinė suma
+    current_personal_balance_all = personal_metrics(df)[4]
+    scenario_start_balance = current_personal_balance_all + one_time_boost
 
     # Projekcija
     last_hist_month = df["month_ts"].max()
@@ -793,8 +861,8 @@ else:
 
         proj_rows.append({
             "Mėnuo": proj_month_ts.strftime("%Y-%m"),
-            "Prognozuojamos pajamos": scenario_income,
-            "Prognozuojamos išlaidos": scenario_expense,
+            "Prognozuojamos tikros pajamos": scenario_income,
+            "Prognozuojamos tikros išlaidos": scenario_expense,
             "Papildomas taupymas": recurring_extra_saving,
             "Atsilaisvinusi suma": extra_release,
             "Mėnesio likutis": proj_net,
@@ -804,7 +872,6 @@ else:
     proj_df = pd.DataFrame(proj_rows)
 
     # Tikslai
-    annual_expense_now = scenario_expense * 12
     reserve_3m = scenario_expense * 3
     reserve_6m = scenario_expense * 6
     reserve_12m = scenario_expense * 12
@@ -821,24 +888,31 @@ else:
     m_to_6 = months_to_target(reserve_6m, scenario_start_balance, scenario_net_after_extra, released_monthly_after, release_start_month)
     m_to_12 = months_to_target(reserve_12m, scenario_start_balance, scenario_net_after_extra, released_monthly_after, release_start_month)
 
-    final_12 = proj_df.iloc[min(11, len(proj_df)-1)]["Prognozuojamas balansas"] if not proj_df.empty else scenario_start_balance
-    final_24 = proj_df.iloc[min(23, len(proj_df)-1)]["Prognozuojamas balansas"] if len(proj_df) >= 1 else scenario_start_balance
+    final_12 = None
+    final_24 = None
+
+    if len(proj_df) >= 12:
+        final_12 = proj_df.iloc[11]["Prognozuojamas balansas"]
+
+    if len(proj_df) >= 24:
+        final_24 = proj_df.iloc[23]["Prognozuojamas balansas"]
+
     final_last = proj_df.iloc[-1]["Prognozuojamas balansas"] if not proj_df.empty else scenario_start_balance
 
-    # Prediction KPI
+    # KPI
     c1, c2, c3 = st.columns(3)
     with c1:
         render_kpi_card(
             "📦 Startinis balansas",
             money(scenario_start_balance),
-            "Dabartinis bendras balansas + vienkartinė suma",
+            "Dabartinis asmeninis balansas + vienkartinė suma",
             "neutral" if scenario_start_balance >= 0 else "negative"
         )
     with c2:
         render_kpi_card(
             "📈 Prognozuojamas mėn. likutis",
             money(scenario_net_after_extra),
-            "Po pajamų / išlaidų / kategorijos mažinimo / papildomo taupymo",
+            "Po tikrų pajamų / tikrų išlaidų / kategorijos mažinimo / papildomo taupymo",
             "positive" if scenario_net_after_extra > 0 else ("warning" if scenario_net_after_extra == 0 else "negative")
         )
     with c3:
@@ -876,8 +950,8 @@ else:
         f"""
         <div class="scenario-box">
             <b>Scenarijaus santrauka</b><br>
-            • Po 12 mėn. prognozuojamas balansas: <b>{money(final_12)}</b><br>
-            • Po 24 mėn. prognozuojamas balansas: <b>{money(final_24 if len(proj_df) >= 24 else final_last)}</b><br>
+            • Po 12 mėn. prognozuojamas balansas: <b>{money(final_12) if final_12 is not None else "neapskaičiuota"}</b><br>
+            • Po 24 mėn. prognozuojamas balansas: <b>{money(final_24) if final_24 is not None else "neapskaičiuota"}</b><br>
             • Kategorijos mažinimo efektas: <b>{money(category_cut_monthly)}/mėn.</b><br>
             • Papildomas taupymas: <b>{money(recurring_extra_saving)}/mėn.</b><br>
             • Papildoma laisva suma nuo {release_start_month}-o mėn.: <b>{money(released_monthly_after)}/mėn.</b>
@@ -886,12 +960,23 @@ else:
         unsafe_allow_html=True
     )
 
-    # Scenarijaus grafikas
-    hist_monthly_balance = month_base.copy()
-    hist_monthly_balance["kumul"] = hist_monthly_balance["net"].cumsum()
-    hist_plot = hist_monthly_balance[["month", "month_ts", "kumul"]].copy()
-    hist_plot["tipas_linijos"] = "Istorinis balansas"
-    hist_plot.rename(columns={"month": "label", "kumul": "balansas"}, inplace=True)
+    # Grafikas: istorinis asmeninis balansas + prognozė
+    hist_months = sorted(df["month"].unique().tolist())
+    hist_rows = []
+    running_hist_balance = 0.0
+
+    for m in hist_months:
+        m_df = df[df["month"] == m].copy()
+        _, _, _, m_personal_expense, m_personal_balance = personal_metrics(m_df)
+        running_hist_balance += m_personal_balance
+        hist_rows.append({
+            "label": m,
+            "month_ts": pd.Timestamp(m + "-01"),
+            "balansas": running_hist_balance,
+            "tipas_linijos": "Istorinis asmeninis balansas"
+        })
+
+    hist_plot = pd.DataFrame(hist_rows)
 
     proj_plot = proj_df.copy()
     proj_plot["month_ts"] = pd.to_datetime(proj_plot["Mėnuo"] + "-01")
@@ -913,16 +998,15 @@ else:
         y="balansas",
         color="tipas_linijos",
         markers=True,
-        title="Istorinis balansas + ateities prognozė"
+        title="Istorinis asmeninis balansas + ateities prognozė"
     )
     fig_proj.update_xaxes(type="category")
     st.plotly_chart(fig_proj, use_container_width=True)
 
-    # What-if per kategoriją
     st.markdown("#### 🧪 Kiek duotų kategorijos sumažinimas?")
     if not cat_recent.empty:
         cat_avg = (
-            cat_recent.assign(kategorija=cat_recent["kategorija"].replace("", "Nežinoma"))
+            cat_recent.assign(kategorija=cat_norm(cat_recent["kategorija"]))
             .groupby("kategorija", as_index=False)["suma_eur"]
             .sum()
         )
@@ -938,7 +1022,7 @@ else:
     st.dataframe(proj_df, use_container_width=True, hide_index=True)
 
 # ======================================================
-# EXPORT
+# EKSPORTAS
 # ======================================================
 st.subheader("⬇️ Eksportas (pagal pasirinktus filtrus)")
 
