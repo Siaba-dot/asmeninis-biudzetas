@@ -26,7 +26,6 @@ CURRENCY = "€"
 # AUTH (Supabase email/password + signup + magic link)
 # ======================================================
 def _store_session(session) -> None:
-    """Išsaugom access/refresh tokenus, kad po rerun galėtume atstatyti sesiją."""
     if session is None:
         st.session_state.pop("sb_session", None)
         return
@@ -36,7 +35,6 @@ def _store_session(session) -> None:
     }
 
 def _restore_session() -> bool:
-    """Atstatom sesiją į supabase klientą iš session_state."""
     s = st.session_state.get("sb_session")
     if not s:
         return False
@@ -48,7 +46,7 @@ def _restore_session() -> bool:
         st.session_state.pop("sb_session", None)
         return False
 
-def login(email: str, password: str) -> tuple[bool, str]:
+def login(email: str, password: str):
     try:
         res = supabase.auth.sign_in_with_password({"email": email, "password": password})
         _store_session(res.session)
@@ -56,10 +54,9 @@ def login(email: str, password: str) -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
-def signup(email: str, password: str) -> tuple[bool, str]:
+def signup(email: str, password: str):
     try:
         res = supabase.auth.sign_up({"email": email, "password": password})
-        # dažnai session nebūna, jei Confirm email ON — čia normalu
         try:
             if getattr(res, "session", None) is not None:
                 _store_session(res.session)
@@ -69,9 +66,8 @@ def signup(email: str, password: str) -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
-def send_magic_link(email: str) -> tuple[bool, str]:
+def send_magic_link(email: str):
     try:
-        # shouldCreateUser=True — leis sukurti vartotoją, jei jo dar nėra
         supabase.auth.sign_in_with_otp({"email": email, "shouldCreateUser": True})
         return True, ""
     except Exception as e:
@@ -85,10 +81,8 @@ def logout():
     st.session_state.clear()
     st.rerun()
 
-# 1) pabandom atstatyti sesiją po rerun
 _restore_session()
 
-# 2) jei vartotojas jau validus — pažymim authenticated
 if "authenticated" not in st.session_state:
     try:
         u = supabase.auth.get_user()
@@ -98,7 +92,6 @@ if "authenticated" not in st.session_state:
     except Exception:
         pass
 
-# 3) jei neprisijungęs — rodome login/signup UI
 if "authenticated" not in st.session_state:
     st.title("🔐 Prisijungimas")
 
@@ -124,7 +117,7 @@ if "authenticated" not in st.session_state:
             ok, err = signup(email.strip(), password)
             if ok:
                 st.success("✅ Paskyra sukurta. Jei įjungtas Confirm email — patvirtink laiške prieš pirmą prisijungimą.")
-                st.info("Jei laiškas neateina (ypač KTU/įmonių paštai), pabandyk 'Magic link' arba testui laikinai išjunk Confirm email.")
+                st.info("Jei laiškas neateina, pabandyk 'Magic link' arba testui laikinai išjunk Confirm email.")
             else:
                 st.error("❌ Nepavyko sukurti paskyros.")
                 st.caption(f"Techninė klaida: {err}")
@@ -156,6 +149,90 @@ def money(x: float) -> str:
         return f"0.00 {CURRENCY}"
 
 # ======================================================
+# KPI UI
+# ======================================================
+def render_kpi_card(title: str, value: str, subtitle: str = "", tone: str = "neutral"):
+    st.markdown(
+        f"""
+        <div class="kpi-card {tone}">
+            <div class="kpi-title">{title}</div>
+            <div class="kpi-value">{value}</div>
+            <div class="kpi-subtitle">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+st.markdown(
+    """
+    <style>
+    .kpi-card {
+        border-radius: 20px;
+        padding: 20px 22px;
+        min-height: 145px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.10);
+        border: 1px solid rgba(255,255,255,0.08);
+        background: linear-gradient(145deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+        backdrop-filter: blur(6px);
+        transition: all 0.2s ease-in-out;
+        margin-bottom: 10px;
+    }
+
+    .kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 14px 34px rgba(0,0,0,0.14);
+    }
+
+    .kpi-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        opacity: 0.85;
+        margin-bottom: 14px;
+        letter-spacing: 0.2px;
+    }
+
+    .kpi-value {
+        font-size: 2rem;
+        font-weight: 800;
+        line-height: 1.1;
+        margin-bottom: 10px;
+    }
+
+    .kpi-subtitle {
+        font-size: 0.88rem;
+        opacity: 0.78;
+        line-height: 1.35;
+    }
+
+    .kpi-card.positive {
+        background: linear-gradient(135deg, rgba(22,163,74,0.22), rgba(22,163,74,0.08));
+        border: 1px solid rgba(34,197,94,0.25);
+    }
+
+    .kpi-card.negative {
+        background: linear-gradient(135deg, rgba(220,38,38,0.22), rgba(220,38,38,0.08));
+        border: 1px solid rgba(239,68,68,0.25);
+    }
+
+    .kpi-card.neutral {
+        background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(99,102,241,0.08));
+        border: 1px solid rgba(96,165,250,0.22);
+    }
+
+    .kpi-card.warning {
+        background: linear-gradient(135deg, rgba(245,158,11,0.22), rgba(245,158,11,0.08));
+        border: 1px solid rgba(251,191,36,0.25);
+    }
+
+    div[data-testid="stHorizontalBlock"] > div:has(.kpi-card) {
+        padding-top: 2px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ======================================================
 # DATA
 # ======================================================
 @st.cache_data(ttl=60, show_spinner=False)
@@ -173,17 +250,14 @@ def fetch_user_data(email: str) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # stabilūs tipai
     df["data"] = pd.to_datetime(df["data"], errors="coerce")
     df = df.dropna(subset=["data"])
     df["suma_eur"] = pd.to_numeric(df["suma_eur"], errors="coerce").fillna(0.0)
 
-    # tekstai
     for col in ["kategorija", "prekybos_centras", "aprasymas", "tipas"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str)
 
-    # periodai
     df["year"] = df["data"].dt.year
     df["month"] = df["data"].dt.to_period("M").astype(str)
     return df
@@ -249,7 +323,7 @@ with st.expander("➕ Naujas įrašas", expanded=True):
 # ======================================================
 df = fetch_user_data(USER_EMAIL)
 if df.empty:
-    st.info("Kol kas nėra įrašų. Įvesk pirmą operaciją ir viskas pradės „gyventi“.")
+    st.info("Kol kas nėra įrašų. Įvesk pirmą operaciją ir viskas pradės gyventi.")
     st.stop()
 
 # ======================================================
@@ -289,29 +363,16 @@ balance = income - expense
 
 st.subheader("📊 KPI")
 
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-
-k1.metric("Pajamos", money(income))
-k2.metric("Išlaidos", money(expense))
-k3.metric("Balansas", money(balance))
-
 savings_rate = None
 if income > 0:
     savings_rate = (income - expense) / income
-k4.metric("Sutaupymo norma", f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—")
 
-# 5–6 finansinė pagalvė ir vid. dienos išlaidos
-# Reikalavimai:
-# - jei pasirinktas mėnuo: skaičiuoti nuo 1 mėn. dienos iki paskutinio įrašo tame mėnesyje
-# - jei pasirinkti tik metai (mėnuo "Visi"): skaičiuoti per visas metų dienas (365/366)
-# - jei "Visi"+"Visi": nuo min(data) iki max(data)
 exp_daily = df_f[df_f["tipas"] == "Išlaidos"].copy()
 
 days_available = None
 avg_daily_expense = None
 end_date = None
 
-# laikui (dienų skaičiavimui) imame tik metai/mėnuo filtrus
 df_time = df.copy()
 if year_filter != "Visi":
     df_time = df_time[df_time["year"] == year_filter]
@@ -323,7 +384,6 @@ min_day = None
 max_day = None
 
 if month_filter != "Visi":
-    # mėnuo: nuo 1 d. iki paskutinio įrašo šiame mėnesyje
     p = pd.Period(month_filter, freq="M")
     min_day = p.start_time.date()
     if not df_time.empty:
@@ -333,20 +393,17 @@ if month_filter != "Visi":
     calendar_days = (max_day - min_day).days + 1
 
 elif year_filter != "Visi":
-    # metai: pilni metai (365/366)
     y = int(year_filter)
     min_day = date(y, 1, 1)
     max_day = date(y, 12, 31)
     calendar_days = (max_day - min_day).days + 1
 
 else:
-    # visi duomenys: nuo min iki max
     if not df_time.empty:
         min_day = df_time["data"].min().date()
         max_day = df_time["data"].max().date()
         calendar_days = (max_day - min_day).days + 1
 
-# Vidurkis per visas kalendorines dienas apsibrėžtame laikotarpyje
 if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty):
     avg_daily_expense = exp_daily["suma_eur"].sum() / calendar_days
 
@@ -354,27 +411,59 @@ if (calendar_days is not None) and (calendar_days > 0) and (not exp_daily.empty)
         days_available = balance / avg_daily_expense
         end_date = date.today() + timedelta(days=int(days_available))
 
-# Finansinė pagalvė
-if days_available is not None and end_date is not None:
-    k5.metric(
-        "Finansinė pagalvė",
-        f"{days_available:.0f} d.",
-        delta=f"iki {end_date.isoformat()} | ~{money(avg_daily_expense)}/d.",
-        delta_color="off"
-    )
+income_tone = "positive" if income > 0 else "neutral"
+expense_tone = "negative" if expense > 0 else "neutral"
+balance_tone = "positive" if balance > 0 else ("negative" if balance < 0 else "neutral")
+
+if savings_rate is None:
+    savings_tone = "neutral"
+elif savings_rate < 0:
+    savings_tone = "negative"
+elif savings_rate < 0.15:
+    savings_tone = "warning"
 else:
-    k5.metric(
-        "Finansinė pagalvė",
-        "—",
-        delta="nepakanka duomenų",
-        delta_color="off"
+    savings_tone = "positive"
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    render_kpi_card("💰 Pajamos", money(income), "Visos pajamos pagal pasirinktą filtrą", income_tone)
+with c2:
+    render_kpi_card("💸 Išlaidos", money(expense), "Visos išlaidos pagal pasirinktą filtrą", expense_tone)
+with c3:
+    render_kpi_card("📈 Balansas", money(balance), "Pajamos minus išlaidos", balance_tone)
+
+c4, c5, c6 = st.columns(3)
+with c4:
+    render_kpi_card(
+        "🎯 Sutaupymo norma",
+        f"{(savings_rate*100):.1f} %" if savings_rate is not None else "—",
+        "Kiek pajamų lieka po išlaidų",
+        savings_tone
     )
 
-# Vidutinės dienos išlaidos
-if avg_daily_expense is not None:
-    k6.metric("Vid. dienos išlaidos", money(avg_daily_expense))
-else:
-    k6.metric("Vid. dienos išlaidos", "—")
+with c5:
+    if days_available is not None and end_date is not None:
+        render_kpi_card(
+            "🛟 Finansinė pagalvė",
+            f"{days_available:.0f} d.",
+            f"iki {end_date.isoformat()} • ~{money(avg_daily_expense)}/d.",
+            "positive" if days_available >= 30 else "warning"
+        )
+    else:
+        render_kpi_card(
+            "🛟 Finansinė pagalvė",
+            "—",
+            "Nepakanka duomenų skaičiavimui",
+            "neutral"
+        )
+
+with c6:
+    render_kpi_card(
+        "📅 Vid. dienos išlaidos",
+        money(avg_daily_expense) if avg_daily_expense is not None else "—",
+        "Skaičiuojama pagal pasirinktą laikotarpį",
+        "warning" if avg_daily_expense is not None else "neutral"
+    )
 
 # ======================================================
 # SMART INSIGHTS (NO AI)
@@ -447,7 +536,7 @@ if cur_income > 0:
     if rate < 0:
         insights.append(f"⚠️ **{current_month}**: išlaidos viršija pajamas (sutaupymo norma {rate*100:.1f}%).")
     elif rate < 0.15:
-        insights.append(f"⚠️ **{current_month}**: sutaupymo norma žema ({rate*100:.1f}%). Tikslui pasiekti reikės mažinti TOP kategorijas.")
+        insights.append(f"⚠️ **{current_month}**: sutaupymo norma žema ({rate*100:.1f}%).")
     else:
         insights.append(f"✅ **{current_month}**: sutaupymo norma {rate*100:.1f}% – kryptis gera.")
 
@@ -471,17 +560,16 @@ if insights:
     for s in insights:
         st.markdown(f"- {s}")
 else:
-    st.info("Dar per mažai duomenų insightams. Įvesk daugiau įrašų arba pasirink konkretų mėnesį.")
+    st.info("Dar per mažai duomenų insightams.")
 
 # ======================================================
-# TABLE: edit + delete (scroll dėžutė)
+# TABLE: edit + delete
 # ======================================================
 st.subheader("📋 Įrašai (redagavimas / trynimas)")
 
 if df_f.empty:
     st.info("Pagal pasirinktus filtrus įrašų nėra.")
 else:
-    # ~10 įrašų matomi, kiti scrollinasi dėžutės viduje
     with st.container(height=420, border=True):
         for _, r in df_f.sort_values("data", ascending=False).iterrows():
             title = f"{r['data'].date()} | {r['tipas']} | {r['kategorija']} | {money(r['suma_eur'])}"
@@ -526,8 +614,6 @@ else:
 # ======================================================
 st.subheader("📈 Analitika")
 
-# --- FIX: kaupiamąjį balansą skaičiuojame per DIENOS net pokytį,
-# kad nebūtų "spyglių" ir klaidinančių šuolių, kai vieną dieną yra keli įrašai.
 df_all = df.sort_values("data").copy()
 df_all["signed"] = df_all["suma_eur"].where(df_all["tipas"] == "Pajamos", -df_all["suma_eur"])
 
@@ -540,11 +626,6 @@ st.plotly_chart(fig_bal, use_container_width=True)
 
 if not df_f.empty:
     tmp = df_f.copy()
-
-    # PATAISYMAS:
-    # 1) atskiras laukas rikiavimui
-    # 2) atskiras tekstinis laukas rodymui
-    # 3) x ašis priverstinai category, kad Plotly neinterpretuotų kaip datos
     tmp["ym_sort"] = tmp["data"].dt.to_period("M").dt.to_timestamp()
     tmp["ym"] = tmp["data"].dt.to_period("M").astype(str)
 
@@ -563,7 +644,6 @@ if not df_f.empty:
         title="Pajamos vs Išlaidos (pagal filtrą)"
     )
     fig_bar.update_xaxes(type="category")
-
     st.plotly_chart(fig_bar, use_container_width=True)
 
 exp_f = df_f[df_f["tipas"] == "Išlaidos"].copy()
@@ -574,11 +654,9 @@ if not exp_f.empty:
         names="kategorija",
         values="suma_eur",
         hole=0.45,
-        title="Išlaidos pagal kategorijas (sumos + %)"
+        title="Išlaidos pagal kategorijas"
     )
     st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.markdown("**Išlaidos pagal kategorijas (sumos):**")
     st.dataframe(cat_sum, use_container_width=True, hide_index=True)
 
 # ======================================================
