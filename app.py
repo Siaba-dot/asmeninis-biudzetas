@@ -296,6 +296,13 @@ def tone_by_value(x: float) -> str:
     return "neutral"
 
 
+def clear_filters():
+    st.session_state["year_filter"] = "Visi"
+    st.session_state["month_filter"] = "Visi"
+    st.session_state["type_filter"] = "Visi"
+    st.session_state["cat_filter"] = ""
+
+
 # ======================================================
 # KPI UI
 # ======================================================
@@ -507,17 +514,21 @@ st.sidebar.markdown("## 🔎 Filtrai")
 years = ["Visi"] + sorted(df["year"].unique().tolist())
 months = ["Visi"] + sorted(df["month"].unique().tolist())
 
+if "year_filter" not in st.session_state:
+    st.session_state["year_filter"] = "Visi"
+if "month_filter" not in st.session_state:
+    st.session_state["month_filter"] = "Visi"
+if "type_filter" not in st.session_state:
+    st.session_state["type_filter"] = "Visi"
+if "cat_filter" not in st.session_state:
+    st.session_state["cat_filter"] = ""
+
 year_filter = st.sidebar.selectbox("Metai", years, key="year_filter")
 month_filter = st.sidebar.selectbox("Mėnuo", months, key="month_filter")
 type_filter = st.sidebar.selectbox("Tipas", ["Visi", "Pajamos", "Išlaidos"], key="type_filter")
 cat_filter = st.sidebar.text_input("Kategorija (paieška)", placeholder="pvz. maist", key="cat_filter")
 
-if st.sidebar.button("🧹 Išvalyti filtrus"):
-    st.session_state["year_filter"] = "Visi"
-    st.session_state["month_filter"] = "Visi"
-    st.session_state["type_filter"] = "Visi"
-    st.session_state["cat_filter"] = ""
-    st.rerun()
+st.sidebar.button("🧹 Išvalyti filtrus", on_click=clear_filters)
 
 df_f = df.copy()
 if year_filter != "Visi":
