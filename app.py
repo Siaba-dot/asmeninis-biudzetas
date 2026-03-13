@@ -22,6 +22,36 @@ PERSONAL_INCOME_CATEGORIES = ["Alga", "Avansas", "Priedas"]
 # o maisto išlaidų kompensacija
 FOOD_SUPPORT_CATEGORY = "Papildomos pajamos maistui"
 
+# Kategorijos, kurios paprastai turi būti tik pajamos
+INCOME_ONLY_CATEGORIES = [
+    "Alga",
+    "Avansas",
+    "Priedas",
+    FOOD_SUPPORT_CATEGORY,
+]
+
+# Kategorijos, kurios paprastai turi būti tik išlaidos
+EXPENSE_ONLY_CATEGORIES = [
+    "Maistas",
+    "Būstas",
+    "Transportas",
+    "Pramogos",
+    "Sveikata",
+    "Drabužiai",
+    "Mokesčiai",
+    "Nuoma",
+    "Paskola",
+    "Kuras",
+    "Vaistai",
+    "Grožis",
+    "Namai",
+    "Vaikai",
+    "Gyvūnai",
+    "Prenumeratos",
+    "Dovanos",
+    "Kita",
+]
+
 # ======================================================
 # SUPABASE
 # ======================================================
@@ -170,19 +200,53 @@ def money(x: float) -> str:
         return f"0.00 {CURRENCY}"
 
 
-def safe_float(x, default=0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
 def add_month_start(dt: pd.Timestamp, n: int) -> pd.Timestamp:
     return (pd.Timestamp(dt).to_period("M") + n).to_timestamp()
 
 
 def cat_norm(series: pd.Series) -> pd.Series:
     return series.fillna("").replace("", "Nežinoma").astype(str).str.strip()
+
+
+def norm_text(x: str) -> str:
+    return str(x or "").strip().casefold()
+
+
+def validate_category_type(tipas: str, kategorija: str):
+    """
+    Grąžina:
+    - status: "ok" | "warning" | "error"
+    - message: paaiškinimas vartotojui
+    """
+    k = norm_text(kategorija)
+    t = norm_text(tipas)
+
+    income_only = {norm_text(x) for x in INCOME_ONLY_CATEGORIES}
+    expense_only = {norm_text(x) for x in EXPENSE_ONLY_CATEGORIES}
+
+    if not k or k == norm_text("Nežinoma"):
+        return "ok", ""
+
+    if k in income_only and t == norm_text("išlaidos"):
+        return (
+            "error",
+            f"Kategorija „{kategorija}“ paprastai turi būti priskirta prie pajamų, ne išlaidų.",
+        )
+
+    if k in expense_only and t == norm_text("pajamos"):
+        return (
+            "error",
+            f"Kategorija „{kategorija}“ paprastai turi būti priskirta prie išlaidų, ne pajamų.",
+        )
+
+    if "maist" in k and t == norm_text("pajamos") and k != norm_text(FOOD_SUPPORT_CATEGORY):
+        return (
+            "warning",
+            f"Kategorija „{kategorija}“ atrodo kaip maisto išlaidos. "
+            f"Jei tai ne kompensacija „{FOOD_SUPPORT_CATEGORY}“, patikrink tipą.",
+        )
+
+    return "ok", ""
 
 
 def personal_income_mask(df_in: pd.DataFrame) -> pd.Series:
@@ -415,8 +479,17 @@ with st.expander("➕ Naujas įrašas", expanded=True):
 
         aprasymas = st.text_input("Aprašymas (nebūtina)", placeholder="pvz. pietūs / nuoma / priedas")
 
-        if st.form_submit_button("💾 Išsaugoti"):
-            insert_row(d, tipas, kategorija, prekyba, aprasymas, suma)
+        submitted = st.form_submit_button("💾 Išsaugoti")
+
+        if submitted:
+            status, message = validate_category_type(tipas, kategorija)
+
+            if status == "error":
+                st.error(message)
+            else:
+                if status == "warning":
+                    st.warning(message)
+                insert_row(d, tipas, kategorija, prekyba, aprasymas, suma)
 
 # ======================================================
 # LOAD
@@ -427,22 +500,24 @@ if df.empty:
     st.stop()
 
 # ======================================================
-# FILTERS
+# FILTERS SIDEBAR
 # ======================================================
-st.subheader("🔎 Filtrai")
+st.sidebar.markdown("## 🔎 Filtrai")
 
 years = ["Visi"] + sorted(df["year"].unique().tolist())
 months = ["Visi"] + sorted(df["month"].unique().tolist())
 
-c1, c2, c3, c4 = st.columns([1, 1.2, 1, 1.2])
-with c1:
-    year_filter = st.selectbox("Metai", years)
-with c2:
-    month_filter = st.selectbox("Mėnuo", months)
-with c3:
-    type_filter = st.selectbox("Tipas", ["Visi", "Pajamos", "Išlaidos"])
-with c4:
-    cat_filter = st.text_input("Kategorija (paieška)", placeholder="pvz. maist")
+year_filter = st.sidebar.selectbox("Metai", years, key="year_filter")
+month_filter = st.sidebar.selectbox("Mėnuo", months, key="month_filter")
+type_filter = st.sidebar.selectbox("Tipas", ["Visi", "Pajamos", "Išlaidos"], key="type_filter")
+cat_filter = st.sidebar.text_input("Kategorija (paieška)", placeholder="pvz. maist", key="cat_filter")
+
+if st.sidebar.button("🧹 Išvalyti filtrus"):
+    st.session_state["year_filter"] = "Visi"
+    st.session_state["month_filter"] = "Visi"
+    st.session_state["type_filter"] = "Visi"
+    st.session_state["cat_filter"] = ""
+    st.rerun()
 
 df_f = df.copy()
 if year_filter != "Visi":
@@ -603,7 +678,6 @@ current_month = month_filter if month_filter != "Visi" else sorted(df["month"].u
 
 cur = df[df["month"] == current_month].copy()
 cur_exp = cur[cur["tipas"] == "Išlaidos"].copy()
-cur_inc = cur[cur["tipas"] == "Pajamos"].copy()
 
 cur_period = pd.Period(current_month, freq="M")
 prev_month = str(cur_period - 1)
@@ -730,10 +804,22 @@ else:
                 new_p = st.text_input("Prekybos vieta", value=r.get("prekybos_centras", ""), key=f"p_{r['id']}")
                 new_a = st.text_input("Aprašymas", value=r.get("aprasymas", ""), key=f"a_{r['id']}")
 
+                status_edit, message_edit = validate_category_type(new_t, new_k)
+                if status_edit == "warning":
+                    st.warning(message_edit)
+                elif status_edit == "error":
+                    st.error(message_edit)
+
                 b1, b2 = st.columns([1, 1])
                 with b1:
                     if st.button("💾 Išsaugoti pakeitimus", key=f"save_{r['id']}"):
-                        update_row(r["id"], new_d, new_t, new_k, new_p, new_a, new_s)
+                        status_save, message_save = validate_category_type(new_t, new_k)
+                        if status_save == "error":
+                            st.error(message_save)
+                        else:
+                            if status_save == "warning":
+                                st.warning(message_save)
+                            update_row(r["id"], new_d, new_t, new_k, new_p, new_a, new_s)
 
                 with b2:
                     if st.button("🗑️ Ištrinti įrašą", key=f"del_{r['id']}"):
