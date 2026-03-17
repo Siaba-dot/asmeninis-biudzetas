@@ -944,26 +944,26 @@ else:
     release_start_month_max = 60
     release_start_month_default = 12
 
-    clamp_int_session_value(
-        key="scenario_lookback",
+    safe_lookback = clamp_int_session_value(
+        key="scenario_lookback_safe",
         min_value=lookback_min,
         max_value=lookback_max,
         default_value=lookback_default,
     )
-    clamp_int_session_value(
-        key="scenario_horizon",
+    safe_horizon = clamp_int_session_value(
+        key="scenario_horizon_safe",
         min_value=scenario_horizon_min,
         max_value=scenario_horizon_max,
         default_value=scenario_horizon_default,
     )
-    clamp_int_session_value(
-        key="reduce_pct",
+    safe_reduce_pct = clamp_int_session_value(
+        key="reduce_pct_safe",
         min_value=reduce_pct_min,
         max_value=reduce_pct_max,
         default_value=reduce_pct_default,
     )
-    clamp_int_session_value(
-        key="release_start_month",
+    safe_release_start_month = clamp_int_session_value(
+        key="release_start_month_safe",
         min_value=release_start_month_min,
         max_value=release_start_month_max,
         default_value=release_start_month_default,
@@ -972,21 +972,32 @@ else:
     with st.expander("⚙️ Scenarijaus nustatymai", expanded=True):
         c1, c2, c3 = st.columns(3)
         with c1:
-            scenario_lookback = st.slider(
-                "Bazės laikotarpis (mėn.)",
-                min_value=lookback_min,
-                max_value=lookback_max,
-                value=st.session_state["scenario_lookback"],
-                key="scenario_lookback",
-            )
+            if lookback_max == 1:
+                scenario_lookback = 1
+                st.number_input(
+                    "Bazės laikotarpis (mėn.)",
+                    min_value=1,
+                    max_value=1,
+                    value=1,
+                    step=1,
+                    disabled=True,
+                    help="Kai istorijoje yra tik vienas mėnuo, bazės laikotarpis fiksuojamas į 1 mėn.",
+                )
+            else:
+                scenario_lookback = st.slider(
+                    "Bazės laikotarpis (mėn.)",
+                    min_value=lookback_min,
+                    max_value=lookback_max,
+                    value=safe_lookback,
+                    step=1,
+                )
         with c2:
             scenario_horizon = st.slider(
                 "Prognozės horizontas (mėn.)",
                 min_value=scenario_horizon_min,
                 max_value=scenario_horizon_max,
-                value=st.session_state["scenario_horizon"],
+                value=safe_horizon,
                 step=1,
-                key="scenario_horizon",
             )
         with c3:
             one_time_boost = st.number_input(
@@ -1058,9 +1069,8 @@ else:
                 "Mažinimas (%)",
                 min_value=reduce_pct_min,
                 max_value=reduce_pct_max,
-                value=st.session_state["reduce_pct"],
+                value=safe_reduce_pct,
                 step=5,
-                key="reduce_pct",
             )
         with c8:
             released_monthly_after = st.number_input(
@@ -1075,10 +1085,14 @@ else:
             "Po kiek mėn. ta suma atsiras",
             min_value=release_start_month_min,
             max_value=release_start_month_max,
-            value=st.session_state["release_start_month"],
+            value=safe_release_start_month,
             step=1,
-            key="release_start_month",
         )
+
+        st.session_state["scenario_lookback_safe"] = int(scenario_lookback)
+        st.session_state["scenario_horizon_safe"] = int(scenario_horizon)
+        st.session_state["reduce_pct_safe"] = int(reduce_pct)
+        st.session_state["release_start_month_safe"] = int(release_start_month)
 
     cat_recent = df[(df["tipas"] == "Išlaidos") & (df["month"].isin(recent_months))].copy()
     category_cut_monthly = 0.0
@@ -1293,4 +1307,3 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
