@@ -303,6 +303,25 @@ def clear_filters():
     st.session_state["cat_filter"] = ""
 
 
+def clamp_int_session_value(key: str, min_value: int, max_value: int, default_value: int) -> int:
+    """
+    Sutvarko session_state reikšmę taip, kad ji niekada neiškristų už leistinų slider ribų.
+    Būtent ši vieta saugo nuo StreamlitAPIException prediction bloke.
+    """
+    if min_value > max_value:
+        max_value = min_value
+
+    current = st.session_state.get(key, default_value)
+    try:
+        current = int(current)
+    except Exception:
+        current = default_value
+
+    current = max(min_value, min(current, max_value))
+    st.session_state[key] = current
+    return current
+
+
 # ======================================================
 # KPI UI
 # ======================================================
@@ -909,17 +928,66 @@ month_base = (
 if month_base.empty:
     st.info("Prediction blokui kol kas per mažai duomenų.")
 else:
+    lookback_min = 1
+    lookback_max = min(12, max(1, len(month_base)))
+    lookback_default = min(6, len(month_base))
+
+    scenario_horizon_min = 3
+    scenario_horizon_max = 60
+    scenario_horizon_default = 12
+
+    reduce_pct_min = 0
+    reduce_pct_max = 100
+    reduce_pct_default = 0
+
+    release_start_month_min = 1
+    release_start_month_max = 60
+    release_start_month_default = 12
+
+    clamp_int_session_value(
+        key="scenario_lookback",
+        min_value=lookback_min,
+        max_value=lookback_max,
+        default_value=lookback_default,
+    )
+    clamp_int_session_value(
+        key="scenario_horizon",
+        min_value=scenario_horizon_min,
+        max_value=scenario_horizon_max,
+        default_value=scenario_horizon_default,
+    )
+    clamp_int_session_value(
+        key="reduce_pct",
+        min_value=reduce_pct_min,
+        max_value=reduce_pct_max,
+        default_value=reduce_pct_default,
+    )
+    clamp_int_session_value(
+        key="release_start_month",
+        min_value=release_start_month_min,
+        max_value=release_start_month_max,
+        default_value=release_start_month_default,
+    )
+
     with st.expander("⚙️ Scenarijaus nustatymai", expanded=True):
         c1, c2, c3 = st.columns(3)
         with c1:
             scenario_lookback = st.slider(
                 "Bazės laikotarpis (mėn.)",
-                1,
-                min(12, max(1, len(month_base))),
-                min(6, len(month_base)),
+                min_value=lookback_min,
+                max_value=lookback_max,
+                value=st.session_state["scenario_lookback"],
+                key="scenario_lookback",
             )
         with c2:
-            scenario_horizon = st.slider("Prognozės horizontas (mėn.)", 3, 60, 12, 1)
+            scenario_horizon = st.slider(
+                "Prognozės horizontas (mėn.)",
+                min_value=scenario_horizon_min,
+                max_value=scenario_horizon_max,
+                value=st.session_state["scenario_horizon"],
+                step=1,
+                key="scenario_horizon",
+            )
         with c3:
             one_time_boost = st.number_input(
                 "Vienkartinė suma pradžioje (€)",
@@ -986,7 +1054,14 @@ else:
         with c6:
             reduce_category = st.selectbox("Kurią kategoriją mažinti scenarijuje", expense_categories)
         with c7:
-            reduce_pct = st.slider("Mažinimas (%)", 0, 100, 0, 5)
+            reduce_pct = st.slider(
+                "Mažinimas (%)",
+                min_value=reduce_pct_min,
+                max_value=reduce_pct_max,
+                value=st.session_state["reduce_pct"],
+                step=5,
+                key="reduce_pct",
+            )
         with c8:
             released_monthly_after = st.number_input(
                 "Papildoma laisva suma po X mėn. (€)",
@@ -996,7 +1071,14 @@ else:
                 format="%.2f",
             )
 
-        release_start_month = st.slider("Po kiek mėn. ta suma atsiras", 1, 60, 12, 1)
+        release_start_month = st.slider(
+            "Po kiek mėn. ta suma atsiras",
+            min_value=release_start_month_min,
+            max_value=release_start_month_max,
+            value=st.session_state["release_start_month"],
+            step=1,
+            key="release_start_month",
+        )
 
     cat_recent = df[(df["tipas"] == "Išlaidos") & (df["month"].isin(recent_months))].copy()
     category_cut_monthly = 0.0
@@ -1211,3 +1293,4 @@ st.download_button(
     file_name="biudzetas.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
